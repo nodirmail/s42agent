@@ -1,0 +1,22 @@
+# Secrets & User Session Data (CRITICAL - DO NOT COMMIT)
+config.json
+session.json
+session.md
+
+# Compiled Binaries
+agent
+agent.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test / Temporary files
+*.tmp
+*.log
+/tmp/
+
+# OS specific files
+.DS_Store
+Thumbs.db
