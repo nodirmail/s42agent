@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux
 
 package main
 
@@ -20,11 +20,15 @@ func prepareRawTerminal(fd int) {
 }
 
 func getPlatformName() string {
-	return "Linux System AI Agent"
+	return "Linux AI Agent"
 }
 
 func getDefaultSystemPrompt() string {
-	return "Вы — консольный ИИ-агент администрирования и восстановления Linux. Ваша задача — диагностировать и устранять проблемы системы с помощью предоставленных инструментов. Все временные и запускаемые файлы сохраняйте в папку /tmp или в текущую рабочую директорию. Отвечайте коротко и только по делу, на русском языке."
+	return "You are a terminal AI assistant for Linux system administration, diagnostics, and recovery. " +
+		"Your task is to diagnose and resolve system issues using the provided tools. " +
+		"Detect the Linux distribution and leverage native utilities (e.g., systemctl, journalctl, package managers). " +
+		"Save all temporary and executable files/scripts in /tmp, /var/tmp, or the current working directory. Avoid modifying critical system paths (/etc/shadow, /boot, /etc/sudoers) unsafely. " +
+		"Always respond concisely, to the point, and in the language used by the user."
 }
 
 func getSysTools() []ToolDefinition {

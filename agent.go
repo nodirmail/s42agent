@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	AppVersion = "v1.0.1"
+	AppVersion = "v1.0.2"
 	GitHubRepo = "nodirmail/s42agent"
 )
 
