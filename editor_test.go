@@ -236,3 +236,28 @@ func TestLineEditorEdgeCases(t *testing.T) {
 	}
 }
 
+func TestIsNewerVersion(t *testing.T) {
+	tests := []struct {
+		latest  string
+		current string
+		want    bool
+	}{
+		{"v1.0.1", "v1.0.0", true},
+		{"v1.1.0", "v1.0.9", true},
+		{"v2.0.0", "v1.99.99", true},
+		{"v1.0.0", "v1.0.0", false},
+		{"v1.0.0", "v1.0.1", false},
+		{"1.2.0", "1.1.9", true},
+		{"", "v1.0.0", false},
+		{"v1.0.0", "", false},
+	}
+
+	for _, tt := range tests {
+		got := isNewerVersion(tt.latest, tt.current)
+		if got != tt.want {
+			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tt.latest, tt.current, got, tt.want)
+		}
+	}
+}
+
+

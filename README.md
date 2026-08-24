@@ -87,8 +87,11 @@ Create a `config.json` file in the application directory (or copy from `config.e
 # Launch with custom API endpoint and model
 ./agent -url "http://127.0.0.1:1234/v1" -model "qwen2.5-coder-7b-instruct"
 
-# List all available models on the server
-./agent -url "http://127.0.0.1:1234/v1" -models
+# Check and install latest release from GitHub
+./agent -update
+
+# Print program version
+./agent -version
 
 # Auto-approve all tool actions without confirmation prompts
 ./agent -A
@@ -105,11 +108,17 @@ Environment variables supported: `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`.
 
 | Command / Shortcut | Action |
 |---|---|
+| `←` / `→` (or `Ctrl+B`/`Ctrl+F`) | Move cursor left/right through input text |
+| `↑` / `↓` (or `Ctrl+P`/`Ctrl+N`) | Navigate command history (or move between lines in multiline) |
+| `Home` / `End` (or `Ctrl+A`/`Ctrl+E`) | Jump to start / end of current line |
+| `Ctrl + ←` / `Ctrl + →` | Jump backward / forward by word |
 | `Enter` | Submit query to agent |
-| `Alt + Enter` / `Ctrl + J` | Insert a newline without submitting |
+| `Alt + Enter` / `Shift + Enter` / `Ctrl + J` | Insert a newline without submitting |
 | `Ctrl + V` | Safely paste multiline logs/code (Bracketed Paste) |
 | `? <query>` | **Consultation Mode**: Text-only advice (tools disabled) |
 | `/help` | Show available slash commands |
+| `/update` | Check for updates on GitHub and self-update |
+| `/version` | Display current application version |
 | `/model` | View available models or switch model (`/model <number|name>`) |
 | `/tokens` | Display token usage and context window percentage |
 | `/compact` | Manually compress older tool results in context |

@@ -12,12 +12,18 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"golang.org/x/term"
+)
+
+var (
+	AppVersion = "v1.0.0"
+	GitHubRepo = "nodirmail/s42agent"
 )
 
 // === Структуры данных для OpenAI-совместимого API ===
@@ -1975,6 +1981,211 @@ func pruneContext(messages []Message, contextLimit int, currentTokens int, force
 	return messages, false
 }
 
+// === Система автоматического обновления (GitHub Releases) ===
+
+type GitHubRelease struct {
+	TagName     string        `json:"tag_name"`
+	Name        string        `json:"name"`
+	Body        string        `json:"body"`
+	Prerelease  bool          `json:"prerelease"`
+	Draft       bool          `json:"draft"`
+	PublishedAt string        `json:"published_at"`
+	Assets      []GitHubAsset `json:"assets"`
+}
+
+type GitHubAsset struct {
+	Name               string `json:"name"`
+	Size               int64  `json:"size"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+func checkLatestRelease() (*GitHubRelease, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", GitHubRepo), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "s42agent/"+AppVersion)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("сервер GitHub вернул статус: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+
+	var rel GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга ответа GitHub: %w", err)
+	}
+	return &rel, nil
+}
+
+func isNewerVersion(latest, current string) bool {
+	l := strings.TrimPrefix(strings.TrimSpace(latest), "v")
+	c := strings.TrimPrefix(strings.TrimSpace(current), "v")
+	if l == "" || c == "" || l == c {
+		return false
+	}
+	lParts := strings.Split(l, ".")
+	cParts := strings.Split(c, ".")
+	maxLen := len(lParts)
+	if len(cParts) > maxLen {
+		maxLen = len(cParts)
+	}
+	for i := 0; i < maxLen; i++ {
+		var lNum, cNum int
+		if i < len(lParts) {
+			clean := regexp.MustCompile(`^\d+`).FindString(lParts[i])
+			lNum, _ = strconv.Atoi(clean)
+		}
+		if i < len(cParts) {
+			clean := regexp.MustCompile(`^\d+`).FindString(cParts[i])
+			cNum, _ = strconv.Atoi(clean)
+		}
+		if lNum > cNum {
+			return true
+		}
+		if lNum < cNum {
+			return false
+		}
+	}
+	return false
+}
+
+func applyUpdate(rel *GitHubRelease) error {
+	targetAssetName := fmt.Sprintf("s42agent-%s-%s", runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		targetAssetName += ".exe"
+	}
+
+	var downloadURL string
+	var assetSize int64
+	for _, a := range rel.Assets {
+		if a.Name == targetAssetName {
+			downloadURL = a.BrowserDownloadURL
+			assetSize = a.Size
+			break
+		}
+	}
+	if downloadURL == "" {
+		return fmt.Errorf("в релизе %s не найден файл для платформы %s/%s (%s)", rel.TagName, runtime.GOOS, runtime.GOARCH, targetAssetName)
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("не удалось определить путь к текущему исполняемому файлу: %w", err)
+	}
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return fmt.Errorf("не удалось разрешить путь к файлу: %w", err)
+	}
+
+	exeDir := filepath.Dir(exePath)
+	tempFile, err := os.CreateTemp(exeDir, "s42agent-update-*")
+	if err != nil {
+		tempFile, err = os.CreateTemp("", "s42agent-update-*")
+		if err != nil {
+			return fmt.Errorf("не удалось создать временный файл: %w", err)
+		}
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+
+	fmt.Printf("Скачивание %s (%s)...\n", rel.TagName, targetAssetName)
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Get(downloadURL)
+	if err != nil {
+		tempFile.Close()
+		return fmt.Errorf("ошибка загрузки: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		tempFile.Close()
+		return fmt.Errorf("сервер вернул статус %d при загрузке", resp.StatusCode)
+	}
+
+	var written int64
+	buf := make([]byte, 32*1024)
+	lastReport := time.Now()
+	for {
+		nr, er := resp.Body.Read(buf)
+		if nr > 0 {
+			nw, ew := tempFile.Write(buf[0:nr])
+			if ew != nil {
+				tempFile.Close()
+				return ew
+			}
+			written += int64(nw)
+			if time.Since(lastReport) > 200*time.Millisecond && assetSize > 0 {
+				percent := float64(written) / float64(assetSize) * 100
+				fmt.Printf("\rЗагрузка: %.1f%% (%d / %d байт)...", percent, written, assetSize)
+				lastReport = time.Now()
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				break
+			}
+			tempFile.Close()
+			return er
+		}
+	}
+	_ = tempFile.Sync()
+	tempFile.Close()
+	fmt.Printf("\rЗагрузка завершена (всего %d байт).           \n", written)
+
+	_ = os.Chmod(tempPath, 0755)
+
+	if runtime.GOOS == "windows" {
+		oldExePath := exePath + ".old"
+		_ = os.Remove(oldExePath)
+		if err := os.Rename(exePath, oldExePath); err != nil {
+			return fmt.Errorf("не удалось переименовать текущий .exe: %w", err)
+		}
+		if err := copyOrMove(tempPath, exePath); err != nil {
+			_ = os.Rename(oldExePath, exePath)
+			return fmt.Errorf("не удалось сохранить обновленный файл: %w", err)
+		}
+	} else {
+		if err := os.Rename(tempPath, exePath); err != nil {
+			if err := copyOrMove(tempPath, exePath); err != nil {
+				return fmt.Errorf("не удалось заменить файл: %w", err)
+			}
+		}
+		_ = os.Chmod(exePath, 0755)
+	}
+
+	fmt.Printf("\n\033[1;32m[Обновление]\033[0m Успешно обновлено до версии \033[1m%s\033[0m!\n", rel.TagName)
+	return nil
+}
+
+func copyOrMove(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
 func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]Message, lastUsage *Usage) bool {
 	cmd := strings.TrimSpace(input)
 	if !strings.HasPrefix(cmd, "/") {
@@ -1991,12 +2202,44 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		fmt.Println("\n\033[1;36m================ Доступные команды ================\033[0m")
 		fmt.Println("  \033[1m? <текст>\033[0m       - Режим консультации: только ответ без выполнения действий")
 		fmt.Println("  \033[1m/help\033[0m           - Показать эту справку")
+		fmt.Println("  \033[1m/update\033[0m         - Проверить и установить обновление с GitHub")
+		fmt.Println("  \033[1m/version\033[0m        - Показать текущую версию программы")
 		fmt.Println("  \033[1m/clear, /reset\033[0m  - Очистить историю диалога и начать заново")
 		fmt.Println("  \033[1m/model\033[0m          - Показать список моделей или сменить (/model <имя|номер>)")
 		fmt.Println("  \033[1m/compact\033[0m        - Вручную сжать старые вызовы инструментов в контексте")
 		fmt.Println("  \033[1m/tokens, /stats\033[0m - Показать статистику использования контекста и токенов")
 		fmt.Println("  \033[1m/exit, /quit\033[0m    - Выход из программы")
 		fmt.Printf("\033[1;36m====================================================\033[0m\n\n")
+		return true
+
+	case "/version":
+		fmt.Printf("\n\033[1;36mВерсия:\033[0m %s (%s/%s)\nРепозиторий: https://github.com/%s\n", AppVersion, runtime.GOOS, runtime.GOARCH, GitHubRepo)
+		return true
+
+	case "/update":
+		fmt.Println("\n\033[36m[Обновление]\033[0m Проверка обновлений на GitHub...")
+		rel, err := checkLatestRelease()
+		if err != nil {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось проверить обновления: %v\n", err)
+			return true
+		}
+		if !isNewerVersion(rel.TagName, AppVersion) {
+			fmt.Printf("\033[1;32m[Обновление]\033[0m У вас уже установлена актуальная версия (%s).\n", AppVersion)
+			return true
+		}
+		fmt.Printf("\n\033[1;36mНайдена новая версия:\033[0m \033[1m%s\033[0m (текущая: %s)\n", rel.TagName, AppVersion)
+		if rel.Body != "" {
+			fmt.Printf("Изменения:\n%s\n\n", strings.TrimSpace(rel.Body))
+		}
+		if !askConfirmation("Установить обновление сейчас? (Y/n): ") {
+			fmt.Println("Обновление отменено.")
+			return true
+		}
+		if err := applyUpdate(rel); err != nil {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось установить обновление: %v\n", err)
+			return true
+		}
+		fmt.Println("Пожалуйста, перезапустите agent для работы с новой версией.")
 		return true
 
 	case "/clear", "/reset":
@@ -2077,6 +2320,10 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 }
 
 func main() {
+	if exePath, err := os.Executable(); err == nil {
+		_ = os.Remove(exePath + ".old")
+	}
+
 	initTools()
 
 	var listModelsRequested bool
@@ -2116,7 +2363,47 @@ func main() {
 	limitFlag := flag.Int("context-limit", 0, "Max context window limit (default: 262144)")
 	autoApproveFlag := flag.Bool("A", false, "Автоматически одобрять все действия без подтверждения")
 	cleanFlag := flag.Bool("clean", false, "Начать новую чистую сессию, игнорируя сохраненную")
+	versionFlag := flag.Bool("version", false, "Показать версию программы")
+	updateFlag := flag.Bool("update", false, "Проверить и установить последнее обновление с GitHub")
 	_ = flag.CommandLine.Parse(sanitizedArgs)
+
+	if *versionFlag {
+		fmt.Printf("s42agent %s (%s/%s)\n", AppVersion, runtime.GOOS, runtime.GOARCH)
+		os.Exit(0)
+	}
+
+	if *updateFlag {
+		fmt.Println("\n\033[36m[Обновление]\033[0m Проверка обновлений на GitHub...")
+		rel, err := checkLatestRelease()
+		if err != nil {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось проверить обновления: %v\n", err)
+			os.Exit(1)
+		}
+		if !isNewerVersion(rel.TagName, AppVersion) {
+			fmt.Printf("\033[1;32m[Обновление]\033[0m У вас уже установлена актуальная версия (%s).\n", AppVersion)
+			os.Exit(0)
+		}
+		fmt.Printf("\n\033[1;36mНайдена новая версия:\033[0m \033[1m%s\033[0m (текущая: %s)\n", rel.TagName, AppVersion)
+		if rel.Body != "" {
+			fmt.Printf("Изменения:\n%s\n\n", strings.TrimSpace(rel.Body))
+		}
+		if err := applyUpdate(rel); err != nil {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось установить обновление: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Фоновая проверка наличия обновлений
+	var updateNotice string
+	checkDone := make(chan struct{})
+	go func() {
+		defer close(checkDone)
+		rel, err := checkLatestRelease()
+		if err == nil && rel != nil && isNewerVersion(rel.TagName, AppVersion) {
+			updateNotice = fmt.Sprintf("💡 \033[1;33mДоступно обновление %s\033[0m (текущая: %s)! Введите \033[1m/update\033[0m для установки.", rel.TagName, AppVersion)
+		}
+	}()
 
 	initSessionPaths()
 
@@ -2257,10 +2544,19 @@ func main() {
 	activeContextLimit := resolveContextLimit(&cfg)
 
 	fmt.Println("\n=======================================================")
-	fmt.Printf("   \033[1;36m%s\033[0m (Go Standalone)\n", getPlatformName())
+	fmt.Printf("   \033[1;36m%s\033[0m (%s, Go Standalone)\n", getPlatformName(), AppVersion)
 	fmt.Printf("   API: %s | Model: %s | Контекст: %d токенов\n", cfg.URL, cfg.Model, activeContextLimit)
-	fmt.Println("   (Введите \033[1m/help\033[0m для списка доступных команд)")
+	fmt.Println("   (Введите \033[1m/help\033[0m для списка команд, \033[1m/update\033[0m для обновления)")
 	fmt.Println("=======================================================")
+
+	select {
+	case <-checkDone:
+		if updateNotice != "" {
+			fmt.Println(updateNotice)
+			fmt.Println("-------------------------------------------------------")
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
 
 	var messages []Message
 	if !*cleanFlag {
