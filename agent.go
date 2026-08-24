@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/term"
 )
@@ -137,6 +138,74 @@ func readLineWithPromptExitOnError(prompt string) string {
 	return val
 }
 
+var inputHistory []string
+
+func addHistory(val string) {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return
+	}
+	if len(inputHistory) > 0 && inputHistory[len(inputHistory)-1] == val {
+		return
+	}
+	inputHistory = append(inputHistory, val)
+}
+
+func runeVisualWidth(r rune) int {
+	if r == 0 || r < 32 || (r >= 0x7f && r < 0xa0) {
+		return 0
+	}
+	if (r >= 0x1100 && r <= 0x115f) ||
+		(r >= 0x2e80 && r <= 0xa4cf && r != 0x303f) ||
+		(r >= 0xac00 && r <= 0xd7a3) ||
+		(r >= 0xf900 && r <= 0xfaff) ||
+		(r >= 0xfe10 && r <= 0xfe19) ||
+		(r >= 0xfe30 && r <= 0xfe6f) ||
+		(r >= 0xff00 && r <= 0xff60) ||
+		(r >= 0xffe0 && r <= 0xffe6) ||
+		(r >= 0x1f300 && r <= 0x1f64f) ||
+		(r >= 0x1f680 && r <= 0x1f6ff) ||
+		(r >= 0x2600 && r <= 0x26ff) ||
+		(r >= 0x2700 && r <= 0x27bf) {
+		return 2
+	}
+	return 1
+}
+
+func stringVisualWidth(s string) int {
+	inEscape := false
+	width := 0
+	for _, r := range s {
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		width += runeVisualWidth(r)
+	}
+	return width
+}
+
+func runesVisualWidth(runes []rune) int {
+	width := 0
+	for _, r := range runes {
+		width += runeVisualWidth(r)
+	}
+	return width
+}
+
+func isWordSep(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	return strings.ContainsRune(" \t\n\r,.;:!?/\\|-_=+*&^%$#@~`'\"()[]{}<>", r)
+}
+
 func readCSISequence(r *bufio.Reader) string {
 	var seq []byte
 	for {
@@ -150,6 +219,381 @@ func readCSISequence(r *bufio.Reader) string {
 		}
 	}
 	return string(seq)
+}
+
+type lineEditor struct {
+	runes              []rune
+	cursorPos          int
+	prompt             string
+	continuationPrompt string
+	prevPhysicalRow    int
+	fd                 int
+
+	historyIndex int
+	savedInput   []rune
+}
+
+func newLineEditor(fd int, prompt string) *lineEditor {
+	return &lineEditor{
+		runes:              nil,
+		cursorPos:          0,
+		prompt:             prompt,
+		continuationPrompt: "... ",
+		prevPhysicalRow:    0,
+		fd:                 fd,
+		historyIndex:       -1,
+		savedInput:         nil,
+	}
+}
+
+func (e *lineEditor) getLines() [][]rune {
+	var lines [][]rune
+	start := 0
+	for i, r := range e.runes {
+		if r == '\n' {
+			lines = append(lines, e.runes[start:i])
+			start = i + 1
+		}
+	}
+	lines = append(lines, e.runes[start:])
+	return lines
+}
+
+func (e *lineEditor) getCursorCoords() (lineIdx int, colIdx int) {
+	cur := 0
+	for _, r := range e.runes {
+		if cur == e.cursorPos {
+			return lineIdx, colIdx
+		}
+		if r == '\n' {
+			lineIdx++
+			colIdx = 0
+		} else {
+			colIdx++
+		}
+		cur++
+	}
+	return lineIdx, colIdx
+}
+
+func (e *lineEditor) getPosFromCoords(targetLine int, targetCol int) int {
+	curLine := 0
+	curCol := 0
+	for i, r := range e.runes {
+		if curLine == targetLine && curCol == targetCol {
+			return i
+		}
+		if r == '\n' {
+			if curLine == targetLine {
+				return i
+			}
+			curLine++
+			curCol = 0
+		} else {
+			curCol++
+		}
+	}
+	return len(e.runes)
+}
+
+func (e *lineEditor) insertRune(r rune) {
+	if e.cursorPos >= len(e.runes) {
+		e.runes = append(e.runes, r)
+	} else {
+		e.runes = append(e.runes[:e.cursorPos], append([]rune{r}, e.runes[e.cursorPos:]...)...)
+	}
+	e.cursorPos++
+}
+
+func (e *lineEditor) insertString(s string) {
+	added := []rune(s)
+	if len(added) == 0 {
+		return
+	}
+	if e.cursorPos >= len(e.runes) {
+		e.runes = append(e.runes, added...)
+	} else {
+		e.runes = append(e.runes[:e.cursorPos], append(added, e.runes[e.cursorPos:]...)...)
+	}
+	e.cursorPos += len(added)
+}
+
+func (e *lineEditor) deleteCharBefore() {
+	if e.cursorPos > 0 {
+		e.runes = append(e.runes[:e.cursorPos-1], e.runes[e.cursorPos:]...)
+		e.cursorPos--
+	}
+}
+
+func (e *lineEditor) deleteCharUnder() {
+	if e.cursorPos < len(e.runes) {
+		e.runes = append(e.runes[:e.cursorPos], e.runes[e.cursorPos+1:]...)
+	}
+}
+
+func (e *lineEditor) moveLeft() {
+	if e.cursorPos > 0 {
+		e.cursorPos--
+	}
+}
+
+func (e *lineEditor) moveRight() {
+	if e.cursorPos < len(e.runes) {
+		e.cursorPos++
+	}
+}
+
+func (e *lineEditor) moveHome() {
+	_, col := e.getCursorCoords()
+	e.cursorPos -= col
+}
+
+func (e *lineEditor) moveEnd() {
+	for e.cursorPos < len(e.runes) && e.runes[e.cursorPos] != '\n' {
+		e.cursorPos++
+	}
+}
+
+func (e *lineEditor) moveWordLeft() {
+	if e.cursorPos == 0 {
+		return
+	}
+	pos := e.cursorPos
+	for pos > 0 && isWordSep(e.runes[pos-1]) {
+		pos--
+	}
+	for pos > 0 && !isWordSep(e.runes[pos-1]) {
+		pos--
+	}
+	e.cursorPos = pos
+}
+
+func (e *lineEditor) moveWordRight() {
+	if e.cursorPos >= len(e.runes) {
+		return
+	}
+	pos := e.cursorPos
+	for pos < len(e.runes) && !isWordSep(e.runes[pos]) {
+		pos++
+	}
+	for pos < len(e.runes) && isWordSep(e.runes[pos]) {
+		pos++
+	}
+	e.cursorPos = pos
+}
+
+func (e *lineEditor) deleteWordLeft() {
+	if e.cursorPos == 0 {
+		return
+	}
+	pos := e.cursorPos
+	for pos > 0 && isWordSep(e.runes[pos-1]) {
+		pos--
+	}
+	for pos > 0 && !isWordSep(e.runes[pos-1]) {
+		pos--
+	}
+	e.runes = append(e.runes[:pos], e.runes[e.cursorPos:]...)
+	e.cursorPos = pos
+}
+
+func (e *lineEditor) deleteToEndOfLine() {
+	end := e.cursorPos
+	for end < len(e.runes) && e.runes[end] != '\n' {
+		end++
+	}
+	if end == e.cursorPos && end < len(e.runes) && e.runes[end] == '\n' {
+		end++
+	}
+	e.runes = append(e.runes[:e.cursorPos], e.runes[end:]...)
+}
+
+func (e *lineEditor) deleteToStartOfLine() {
+	_, col := e.getCursorCoords()
+	start := e.cursorPos - col
+	e.runes = append(e.runes[:start], e.runes[e.cursorPos:]...)
+	e.cursorPos = start
+}
+
+func (e *lineEditor) moveUp() {
+	curLine, curCol := e.getCursorCoords()
+	if curLine > 0 {
+		e.cursorPos = e.getPosFromCoords(curLine-1, curCol)
+		return
+	}
+	if len(inputHistory) == 0 {
+		e.cursorPos = 0
+		return
+	}
+	if e.historyIndex == -1 {
+		e.savedInput = append([]rune(nil), e.runes...)
+		e.historyIndex = len(inputHistory) - 1
+	} else if e.historyIndex > 0 {
+		e.historyIndex--
+	} else {
+		return
+	}
+	e.runes = []rune(inputHistory[e.historyIndex])
+	e.cursorPos = len(e.runes)
+}
+
+func (e *lineEditor) moveDown() {
+	lines := e.getLines()
+	curLine, curCol := e.getCursorCoords()
+	if curLine < len(lines)-1 {
+		e.cursorPos = e.getPosFromCoords(curLine+1, curCol)
+		return
+	}
+	if e.historyIndex != -1 {
+		if e.historyIndex < len(inputHistory)-1 {
+			e.historyIndex++
+			e.runes = []rune(inputHistory[e.historyIndex])
+			e.cursorPos = len(e.runes)
+		} else {
+			e.historyIndex = -1
+			e.runes = e.savedInput
+			e.savedInput = nil
+			e.cursorPos = len(e.runes)
+		}
+	} else {
+		e.cursorPos = len(e.runes)
+	}
+}
+
+func (e *lineEditor) redraw() {
+	var b strings.Builder
+
+	if e.prevPhysicalRow > 0 {
+		b.WriteString(fmt.Sprintf("\x1b[%dA", e.prevPhysicalRow))
+	}
+	b.WriteString("\r\x1b[J")
+
+	lines := e.getLines()
+	for i, line := range lines {
+		if i == 0 {
+			b.WriteString(e.prompt)
+		} else {
+			b.WriteString(e.continuationPrompt)
+		}
+		b.WriteString(string(line))
+		if i < len(lines)-1 {
+			b.WriteString("\r\n")
+		}
+	}
+
+	w, _, err := term.GetSize(e.fd)
+	termWidth := w
+	if err != nil || termWidth <= 0 {
+		termWidth = 999999
+	}
+
+	promptWidth := stringVisualWidth(e.prompt)
+	contWidth := stringVisualWidth(e.continuationPrompt)
+
+	lineStartPhysicalRow := make([]int, len(lines))
+	currentRow := 0
+	for i, line := range lines {
+		lineStartPhysicalRow[i] = currentRow
+		pw := contWidth
+		if i == 0 {
+			pw = promptWidth
+		}
+		totalWidth := pw + runesVisualWidth(line)
+		numRows := 1
+		if totalWidth > 0 && termWidth > 0 {
+			numRows = (totalWidth + termWidth - 1) / termWidth
+			if numRows < 1 {
+				numRows = 1
+			}
+		}
+		currentRow += numRows
+	}
+
+	curLine, curCol := e.getCursorCoords()
+	pw := contWidth
+	if curLine == 0 {
+		pw = promptWidth
+	}
+	cursorVisualCol := pw + runesVisualWidth(lines[curLine][:curCol])
+	cursorRowOffset := 0
+	cursorColInRow := cursorVisualCol
+	if termWidth > 0 && termWidth < 999999 {
+		cursorRowOffset = cursorVisualCol / termWidth
+		cursorColInRow = cursorVisualCol % termWidth
+	}
+	targetCursorPhysicalRow := lineStartPhysicalRow[curLine] + cursorRowOffset
+
+	lastIdx := len(lines) - 1
+	lastPw := contWidth
+	if lastIdx == 0 {
+		lastPw = promptWidth
+	}
+	lastVisualCol := lastPw + runesVisualWidth(lines[lastIdx])
+	lastRowOffset := 0
+	if termWidth > 0 && termWidth < 999999 {
+		lastRowOffset = lastVisualCol / termWidth
+	}
+	endPhysicalRow := lineStartPhysicalRow[lastIdx] + lastRowOffset
+
+	rowsUp := endPhysicalRow - targetCursorPhysicalRow
+	if rowsUp > 0 {
+		b.WriteString(fmt.Sprintf("\x1b[%dA", rowsUp))
+	}
+	b.WriteString("\r")
+	if cursorColInRow > 0 {
+		b.WriteString(fmt.Sprintf("\x1b[%dC", cursorColInRow))
+	}
+
+	e.prevPhysicalRow = targetCursorPhysicalRow
+	os.Stdout.WriteString(b.String())
+}
+
+func (e *lineEditor) finish() {
+	lines := e.getLines()
+	w, _, err := term.GetSize(e.fd)
+	termWidth := w
+	if err != nil || termWidth <= 0 {
+		termWidth = 999999
+	}
+	promptWidth := stringVisualWidth(e.prompt)
+	contWidth := stringVisualWidth(e.continuationPrompt)
+
+	lineStartPhysicalRow := make([]int, len(lines))
+	currentRow := 0
+	for i, line := range lines {
+		lineStartPhysicalRow[i] = currentRow
+		pw := contWidth
+		if i == 0 {
+			pw = promptWidth
+		}
+		totalWidth := pw + runesVisualWidth(line)
+		numRows := 1
+		if totalWidth > 0 && termWidth > 0 {
+			numRows = (totalWidth + termWidth - 1) / termWidth
+			if numRows < 1 {
+				numRows = 1
+			}
+		}
+		currentRow += numRows
+	}
+
+	lastIdx := len(lines) - 1
+	lastPw := contWidth
+	if lastIdx == 0 {
+		lastPw = promptWidth
+	}
+	lastVisualCol := lastPw + runesVisualWidth(lines[lastIdx])
+	lastRowOffset := 0
+	if termWidth > 0 && termWidth < 999999 {
+		lastRowOffset = lastVisualCol / termWidth
+	}
+	endPhysicalRow := lineStartPhysicalRow[lastIdx] + lastRowOffset
+
+	rowsDown := endPhysicalRow - e.prevPhysicalRow
+	if rowsDown > 0 {
+		os.Stdout.WriteString(fmt.Sprintf("\x1b[%dB", rowsDown))
+	}
+	os.Stdout.WriteString("\r\n")
 }
 
 func readMultilineInput(prompt string) (string, error) {
@@ -184,27 +628,29 @@ func readMultilineInput(prompt string) (string, error) {
 	os.Stdout.WriteString("\x1b[?2004h")
 	defer os.Stdout.WriteString("\x1b[?2004l")
 
-	if prompt != "" {
-		fmt.Print(prompt)
-	}
+	ed := newLineEditor(fd, prompt)
+	ed.redraw()
 
-	var runes []rune
-	continuationPrompt := "... "
 	inPaste := false
 	inReader := bufio.NewReader(os.Stdin)
 
 	for {
 		r, _, err := inReader.ReadRune()
 		if err != nil {
-			if len(runes) > 0 {
-				fmt.Print("\r\n")
-				return string(runes), nil
+			if len(ed.runes) > 0 {
+				ed.finish()
+				val := string(ed.runes)
+				addHistory(val)
+				return val, nil
 			}
 			return "", err
 		}
 
 		// Обработка Escape-последовательностей
 		if r == '\x1b' {
+			if inReader.Buffered() == 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
 			if inReader.Buffered() > 0 {
 				next, err := inReader.Peek(1)
 				if err == nil && len(next) > 0 {
@@ -216,8 +662,8 @@ func readMultilineInput(prompt string) (string, error) {
 								_, _ = inReader.ReadByte()
 							}
 						}
-						runes = append(runes, '\n')
-						fmt.Print("\r\n" + continuationPrompt)
+						ed.insertRune('\n')
+						ed.redraw()
 						continue
 					} else if next[0] == '[' {
 						_, _ = inReader.ReadByte() // '['
@@ -227,25 +673,106 @@ func readMultilineInput(prompt string) (string, error) {
 							continue
 						} else if seq == "201~" {
 							inPaste = false
+							ed.redraw()
 							continue
-						} else if seq == "13;2u" || seq == "27;2;13~" || seq == "13;3u" || seq == "13;5u" {
-							// Shift+Enter / Alt+Enter / Ctrl+Enter в терминалах с расширенным протоколом
-							runes = append(runes, '\n')
-							fmt.Print("\r\n" + continuationPrompt)
+						}
+						if inPaste {
 							continue
+						}
+						switch seq {
+						case "D": // Влево
+							ed.moveLeft()
+							ed.redraw()
+						case "C": // Вправо
+							ed.moveRight()
+							ed.redraw()
+						case "A": // Вверх
+							ed.moveUp()
+							ed.redraw()
+						case "B": // Вниз
+							ed.moveDown()
+							ed.redraw()
+						case "H", "1~", "7~": // Home
+							ed.moveHome()
+							ed.redraw()
+						case "F", "4~", "8~": // End
+							ed.moveEnd()
+							ed.redraw()
+						case "3~": // Delete
+							ed.deleteCharUnder()
+							ed.redraw()
+						case "1;5D", "5D", "1;3D", "1;2D": // Ctrl+Left / Alt+Left
+							ed.moveWordLeft()
+							ed.redraw()
+						case "1;5C", "5C", "1;3C", "1;2C": // Ctrl+Right / Alt+Right
+							ed.moveWordRight()
+							ed.redraw()
+						case "13;2u", "27;2;13~", "13;3u", "13;5u", "27;5;13~":
+							// Shift+Enter / Alt+Enter / Ctrl+Enter
+							ed.insertRune('\n')
+							ed.redraw()
 						}
 						continue
 					} else if next[0] == 'O' {
 						_, _ = inReader.ReadByte() // 'O'
+						if inReader.Buffered() == 0 {
+							time.Sleep(2 * time.Millisecond)
+						}
 						if inReader.Buffered() > 0 {
 							finalByte, err := inReader.ReadByte()
-							if err == nil && finalByte == 'M' {
-								// Keypad Enter / Shift+Enter
-								runes = append(runes, '\n')
-								fmt.Print("\r\n" + continuationPrompt)
-								continue
+							if err == nil {
+								switch finalByte {
+								case 'D': // Влево
+									ed.moveLeft()
+									ed.redraw()
+								case 'C': // Вправо
+									ed.moveRight()
+									ed.redraw()
+								case 'A': // Вверх
+									ed.moveUp()
+									ed.redraw()
+								case 'B': // Вниз
+									ed.moveDown()
+									ed.redraw()
+								case 'H': // Home
+									ed.moveHome()
+									ed.redraw()
+								case 'F': // End
+									ed.moveEnd()
+									ed.redraw()
+								case 'M': // Keypad Enter / Shift+Enter
+									ed.insertRune('\n')
+									ed.redraw()
+								}
 							}
 						}
+						continue
+					} else if next[0] == 'b' || next[0] == 'B' {
+						_, _ = inReader.ReadByte()
+						ed.moveWordLeft()
+						ed.redraw()
+						continue
+					} else if next[0] == 'f' || next[0] == 'F' {
+						_, _ = inReader.ReadByte()
+						ed.moveWordRight()
+						ed.redraw()
+						continue
+					} else if next[0] == 'd' || next[0] == 'D' {
+						_, _ = inReader.ReadByte()
+						pos := ed.cursorPos
+						for pos < len(ed.runes) && isWordSep(ed.runes[pos]) {
+							pos++
+						}
+						for pos < len(ed.runes) && !isWordSep(ed.runes[pos]) {
+							pos++
+						}
+						ed.runes = append(ed.runes[:ed.cursorPos], ed.runes[pos:]...)
+						ed.redraw()
+						continue
+					} else if next[0] == '\x7f' || next[0] == '\b' {
+						_, _ = inReader.ReadByte()
+						ed.deleteWordLeft()
+						ed.redraw()
 						continue
 					}
 				}
@@ -261,20 +788,16 @@ func readMultilineInput(prompt string) (string, error) {
 						_, _ = inReader.ReadByte()
 					}
 				}
-				runes = append(runes, '\n')
-				fmt.Print("\r\n" + continuationPrompt)
+				ed.insertRune('\n')
 				continue
 			} else if r == '\n' {
-				runes = append(runes, '\n')
-				fmt.Print("\r\n" + continuationPrompt)
+				ed.insertRune('\n')
 				continue
 			} else if r == '\t' {
-				runes = append(runes, '\t')
-				fmt.Print("    ")
+				ed.insertString("    ")
 				continue
 			}
-			runes = append(runes, r)
-			fmt.Print(string(r))
+			ed.insertRune(r)
 			continue
 		}
 
@@ -286,65 +809,85 @@ func readMultilineInput(prompt string) (string, error) {
 					_, _ = inReader.ReadByte()
 				}
 			}
-			fmt.Print("\r\n")
-			return string(runes), nil
+			ed.finish()
+			val := string(ed.runes)
+			addHistory(val)
+			return val, nil
 
 		case '\n': // Ctrl+J -> перенос строки
-			runes = append(runes, '\n')
-			fmt.Print("\r\n" + continuationPrompt)
+			ed.insertRune('\n')
+			ed.redraw()
 
-		case '\x03': // Ctrl+C -> очистка текущего ввода
-			fmt.Print("^C\r\n")
-			runes = nil
-			if prompt != "" {
-				fmt.Print(prompt)
-			}
+		case '\x01': // Ctrl+A -> Home
+			ed.moveHome()
+			ed.redraw()
 
-		case '\x04': // Ctrl+D -> завершение (EOF если пусто, отправка если есть текст)
-			if len(runes) == 0 {
-				fmt.Print("\r\n")
+		case '\x05': // Ctrl+E -> End
+			ed.moveEnd()
+			ed.redraw()
+
+		case '\x02': // Ctrl+B -> Влево
+			ed.moveLeft()
+			ed.redraw()
+
+		case '\x06': // Ctrl+F -> Вправо
+			ed.moveRight()
+			ed.redraw()
+
+		case '\x10': // Ctrl+P -> Вверх
+			ed.moveUp()
+			ed.redraw()
+
+		case '\x0e': // Ctrl+N -> Вниз
+			ed.moveDown()
+			ed.redraw()
+
+		case '\x0b': // Ctrl+K -> Удалить до конца строки
+			ed.deleteToEndOfLine()
+			ed.redraw()
+
+		case '\x15': // Ctrl+U -> Удалить до начала строки
+			ed.deleteToStartOfLine()
+			ed.redraw()
+
+		case '\x17': // Ctrl+W -> Удалить слово слева
+			ed.deleteWordLeft()
+			ed.redraw()
+
+		case '\x0c': // Ctrl+L -> Очистить экран и перерисовать
+			os.Stdout.WriteString("\x1b[2J\x1b[H")
+			ed.prevPhysicalRow = 0
+			ed.redraw()
+
+		case '\x03': // Ctrl+C -> сброс текущего ввода
+			os.Stdout.WriteString("^C\r\n")
+			ed.runes = nil
+			ed.cursorPos = 0
+			ed.prevPhysicalRow = 0
+			ed.historyIndex = -1
+			ed.savedInput = nil
+			ed.redraw()
+
+		case '\x04': // Ctrl+D -> завершение (EOF если пусто, Delete если есть текст)
+			if len(ed.runes) == 0 {
+				os.Stdout.WriteString("\r\n")
 				return "", io.EOF
 			}
-			fmt.Print("\r\n")
-			return string(runes), nil
+			ed.deleteCharUnder()
+			ed.redraw()
 
 		case '\b', '\x7f': // Backspace
-			if len(runes) > 0 {
-				last := runes[len(runes)-1]
-				runes = runes[:len(runes)-1]
-				if last == '\n' {
-					// Стираем текущую строку '... ' и переходим на предыдущую
-					fmt.Print("\r\x1b[K\x1b[A")
-					prevLineLen := 0
-					for i := len(runes) - 1; i >= 0; i-- {
-						if runes[i] == '\n' {
-							break
-						}
-						prevLineLen++
-					}
-					if !strings.ContainsRune(string(runes), '\n') {
-						prevLineLen += len(prompt)
-					} else {
-						prevLineLen += len(continuationPrompt)
-					}
-					if prevLineLen > 0 {
-						fmt.Printf("\r\x1b[%dC", prevLineLen)
-					} else {
-						fmt.Print("\r")
-					}
-				} else {
-					fmt.Print("\b \b")
-				}
-			}
+			ed.deleteCharBefore()
+			ed.redraw()
 
 		case '\t':
-			runes = append(runes, '\t')
-			fmt.Print("    ")
+			ed.insertString("    ")
+			ed.redraw()
 
 		default:
 			if r >= 32 {
-				runes = append(runes, r)
-				fmt.Print(string(r))
+				ed.insertRune(r)
+				ed.redraw()
 			}
 		}
 	}
@@ -1453,7 +1996,7 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		fmt.Println("  \033[1m/compact\033[0m        - Вручную сжать старые вызовы инструментов в контексте")
 		fmt.Println("  \033[1m/tokens, /stats\033[0m - Показать статистику использования контекста и токенов")
 		fmt.Println("  \033[1m/exit, /quit\033[0m    - Выход из программы")
-		fmt.Println("\033[1;36m====================================================\033[0m\n")
+		fmt.Printf("\033[1;36m====================================================\033[0m\n\n")
 		return true
 
 	case "/clear", "/reset":
@@ -1645,7 +2188,7 @@ func main() {
 		fmt.Println("=======================================================")
 		fmt.Println("\nИспользование:")
 		fmt.Println("  ./agent -model <имя_модели или номер>")
-		fmt.Println("=======================================================\n")
+		fmt.Printf("=======================================================\n\n")
 		os.Exit(0)
 	}
 
@@ -1734,7 +2277,7 @@ func main() {
 						fmt.Printf("\033[1;35mИИ >>>\033[0m %s\n", *m.Content)
 					}
 				}
-				fmt.Println("--- Сессия успешно восстановлена ---\n")
+				fmt.Printf("--- Сессия успешно восстановлена ---\n\n")
 			}
 		}
 	}
