@@ -227,6 +227,19 @@ func readCSISequence(r *bufio.Reader) string {
 	return string(seq)
 }
 
+func getTerminalWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	if w, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && w > 0 {
+		return w
+	}
+	if w, _, err := term.GetSize(int(os.Stdin.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 80
+}
+
 type lineEditor struct {
 	runes              []rune
 	cursorPos          int
@@ -487,11 +500,7 @@ func (e *lineEditor) redraw() {
 		}
 	}
 
-	w, _, err := term.GetSize(e.fd)
-	termWidth := w
-	if err != nil || termWidth <= 0 {
-		termWidth = 999999
-	}
+	termWidth := getTerminalWidth()
 
 	promptWidth := stringVisualWidth(e.prompt)
 	contWidth := stringVisualWidth(e.continuationPrompt)
@@ -523,7 +532,7 @@ func (e *lineEditor) redraw() {
 	cursorVisualCol := pw + runesVisualWidth(lines[curLine][:curCol])
 	cursorRowOffset := 0
 	cursorColInRow := cursorVisualCol
-	if termWidth > 0 && termWidth < 999999 {
+	if termWidth > 0 {
 		cursorRowOffset = cursorVisualCol / termWidth
 		cursorColInRow = cursorVisualCol % termWidth
 	}
@@ -536,7 +545,7 @@ func (e *lineEditor) redraw() {
 	}
 	lastVisualCol := lastPw + runesVisualWidth(lines[lastIdx])
 	lastRowOffset := 0
-	if termWidth > 0 && termWidth < 999999 {
+	if termWidth > 0 {
 		lastRowOffset = lastVisualCol / termWidth
 	}
 	endPhysicalRow := lineStartPhysicalRow[lastIdx] + lastRowOffset
@@ -556,11 +565,7 @@ func (e *lineEditor) redraw() {
 
 func (e *lineEditor) finish() {
 	lines := e.getLines()
-	w, _, err := term.GetSize(e.fd)
-	termWidth := w
-	if err != nil || termWidth <= 0 {
-		termWidth = 999999
-	}
+	termWidth := getTerminalWidth()
 	promptWidth := stringVisualWidth(e.prompt)
 	contWidth := stringVisualWidth(e.continuationPrompt)
 
@@ -590,7 +595,7 @@ func (e *lineEditor) finish() {
 	}
 	lastVisualCol := lastPw + runesVisualWidth(lines[lastIdx])
 	lastRowOffset := 0
-	if termWidth > 0 && termWidth < 999999 {
+	if termWidth > 0 {
 		lastRowOffset = lastVisualCol / termWidth
 	}
 	endPhysicalRow := lineStartPhysicalRow[lastIdx] + lastRowOffset
@@ -888,11 +893,33 @@ func readMultilineInput(prompt string) (string, error) {
 
 		case '\t':
 			ed.insertString("    ")
+			for inReader.Buffered() > 0 {
+				next, err := inReader.Peek(1)
+				if err != nil || len(next) == 0 || next[0] == '\x1b' || next[0] < 32 {
+					break
+				}
+				nextRune, _, err := inReader.ReadRune()
+				if err != nil {
+					break
+				}
+				ed.insertRune(nextRune)
+			}
 			ed.redraw()
 
 		default:
 			if r >= 32 {
 				ed.insertRune(r)
+				for inReader.Buffered() > 0 {
+					next, err := inReader.Peek(1)
+					if err != nil || len(next) == 0 || next[0] == '\x1b' || next[0] < 32 {
+						break
+					}
+					nextRune, _, err := inReader.ReadRune()
+					if err != nil {
+						break
+					}
+					ed.insertRune(nextRune)
+				}
 				ed.redraw()
 			}
 		}
