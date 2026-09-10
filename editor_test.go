@@ -374,6 +374,18 @@ func TestBuildMultimodalMessageContentWithTempFile(t *testing.T) {
 	if !strings.Contains(result, "является изображением") {
 		t.Fatalf("expected readFile to detect image, got %q", result)
 	}
+
+	// Test viewImage tool
+	toolResult, imgPart := viewImage(imgFile)
+	if !strings.Contains(toolResult, "успешно загружено") {
+		t.Fatalf("expected viewImage to report success, got %q", toolResult)
+	}
+	if imgPart == nil || imgPart.ImageURL == nil {
+		t.Fatalf("expected viewImage to return valid image part")
+	}
+	if !strings.HasPrefix(imgPart.ImageURL.URL, "data:image/png;base64,") {
+		t.Fatalf("expected valid data URL in imgPart, got %q", imgPart.ImageURL.URL)
+	}
 }
 
 

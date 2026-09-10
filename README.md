@@ -31,6 +31,7 @@ Built with pure Go, it requires no heavy runtime dependencies (no Python, no Nod
 |---|---|:---:|
 | `execute_cmd` | Execute shell/bash/CMD commands with timeout | ⚠️ Required (or `-A` flag) |
 | `read_file` | Read files on disk with output truncation protection | Automatic |
+| `view_image` | Load and visually inspect images/screenshots on disk (`.png`, `.jpg`, etc.) | Automatic |
 | `write_file` | Create or overwrite files with system path protection | ⚠️ Required |
 | `dir_list` | Inspect directory contents and file sizes | Automatic |
 | `get_sys_env` | Collect environment info (OS, kernel, disks, root/admin privileges) | Automatic |

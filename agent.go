@@ -26,7 +26,7 @@ import (
 )
 
 var (
-	AppVersion = "v1.0.4"
+	AppVersion = "v1.0.5"
 	GitHubRepo = "nodirmail/s42agent"
 )
 
@@ -1053,6 +1053,23 @@ var baseTools = []ToolDefinition{
 	{
 		Type: "function",
 		Function: FunctionDefinition{
+			Name:        "view_image",
+			Description: "Загрузить и визуально проанализировать изображение или скриншот на диске (PNG, JPG, JPEG, WEBP, GIF, BMP). Передаёт изображение в зрительное восприятие модели.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Абсолютный путь к файлу изображения на диске.",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: FunctionDefinition{
 			Name:        "read_file",
 			Description: "Прочитать содержимое файла на диске.",
 			Parameters: map[string]interface{}{
@@ -1364,6 +1381,44 @@ func buildMultimodalMessageContent(input string) (interface{}, error) {
 	}
 
 	return parts, nil
+}
+
+func viewImage(path string) (string, *ContentPart) {
+	fmt.Printf("\n\033[36m[Изображение]\033[0m Анализ файла: %s\n", path)
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return fmt.Sprintf("ОШИБКА: Файл не найден: %v", err), nil
+	}
+	if info.IsDir() {
+		return fmt.Sprintf("ОШИБКА: Указанный путь является директорией: %s", cleanPath), nil
+	}
+
+	const maxImageBytes = 20 * 1024 * 1024 // 20 МБ
+	if info.Size() > maxImageBytes {
+		return fmt.Sprintf("ОШИБКА: Файл слишком большой (%d байт > 20 МБ)", info.Size()), nil
+	}
+
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return fmt.Sprintf("ОШИБКА чтения изображения: %v", err), nil
+	}
+
+	mimeType := getImageMimeType(cleanPath)
+	b64 := base64.StdEncoding.EncodeToString(data)
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
+
+	fmt.Printf("\033[36m[Изображение]\033[0m Успешно загружено для модели: %s (%.1f КБ)\n", cleanPath, float64(len(data))/1024.0)
+
+	part := &ContentPart{
+		Type: "image_url",
+		ImageURL: &ImageURL{
+			URL: dataURL,
+		},
+	}
+
+	resultText := fmt.Sprintf("Изображение %s (%s, %d байт) успешно загружено и прикреплено в диалог. Содержимое передано в ваше зрительное восприятие.", filepath.Base(cleanPath), mimeType, len(data))
+	return resultText, part
 }
 
 // === Реализация базовых системных вызовов ===
@@ -3006,6 +3061,8 @@ func main() {
 			// Обработка запрошенных инструментов
 			for _, toolCall := range assistantMessage.ToolCalls {
 				var toolResult string
+				var injectedImagePart *ContentPart
+				var injectedImageName string
 
 				switch toolCall.Function.Name {
 				case "execute_cmd":
@@ -3018,12 +3075,28 @@ func main() {
 						toolResult = "ОШИБКА: Неверные параметры функции."
 					}
 
+				case "view_image":
+					var args struct {
+						Path string `json:"path"`
+					}
+					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err == nil {
+						toolResult, injectedImagePart = viewImage(args.Path)
+						injectedImageName = filepath.Base(args.Path)
+					} else {
+						toolResult = "ОШИБКА: Неверные параметры функции."
+					}
+
 				case "read_file":
 					var args struct {
 						Path string `json:"path"`
 					}
 					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err == nil {
-						toolResult = readFile(args.Path)
+						if isImageFile(args.Path) {
+							toolResult, injectedImagePart = viewImage(args.Path)
+							injectedImageName = filepath.Base(args.Path)
+						} else {
+							toolResult = readFile(args.Path)
+						}
 					} else {
 						toolResult = "ОШИБКА: Неверные параметры функции."
 					}
@@ -3093,6 +3166,18 @@ func main() {
 					ToolCallID: toolCall.ID,
 					Name:       toolCall.Function.Name,
 				})
+				if injectedImagePart != nil {
+					messages = append(messages, Message{
+						Role: "user",
+						Content: []ContentPart{
+							{
+								Type: "text",
+								Text: fmt.Sprintf("[Изображение %s передано в зрительное восприятие]", injectedImageName),
+							},
+							*injectedImagePart,
+						},
+					})
+				}
 				saveSession(messages)
 				saveMarkdownLog(messages, cfg.Model, cfg.URL)
 			}
