@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -22,18 +26,92 @@ import (
 )
 
 var (
-	AppVersion = "v1.0.3"
+	AppVersion = "v1.0.4"
 	GitHubRepo = "nodirmail/s42agent"
 )
 
 // === Структуры данных для OpenAI-совместимого API ===
 
+type ContentPart struct {
+	Type     string    `json:"type"` // "text" или "image_url"
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+type ImageURL struct {
+	URL string `json:"url"` // "data:image/png;base64,..."
+}
+
 type Message struct {
-	Role       string     `json:"role"`
-	Content    *string    `json:"content"` // *string позволяет отправлять null, когда есть ToolCalls
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content"` // *string, string, []ContentPart или nil
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Name       string      `json:"name,omitempty"`
+}
+
+func (m *Message) GetText() string {
+	if m.Content == nil {
+		return ""
+	}
+	switch v := m.Content.(type) {
+	case string:
+		return v
+	case *string:
+		if v != nil {
+			return *v
+		}
+		return ""
+	case []ContentPart:
+		var sb strings.Builder
+		for _, p := range v {
+			if p.Type == "text" {
+				sb.WriteString(p.Text)
+			}
+		}
+		return sb.String()
+	case []interface{}:
+		var sb strings.Builder
+		for _, item := range v {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				if itemMap["type"] == "text" {
+					if text, ok := itemMap["text"].(string); ok {
+						sb.WriteString(text)
+					}
+				}
+			}
+		}
+		return sb.String()
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func (m *Message) HasImages() bool {
+	if m.Content == nil {
+		return false
+	}
+	switch v := m.Content.(type) {
+	case []ContentPart:
+		for _, p := range v {
+			if p.Type == "image_url" {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				if itemMap["type"] == "image_url" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (m *Message) SetText(text string) {
+	m.Content = &text
 }
 
 type ToolCall struct {
@@ -870,7 +948,11 @@ func readMultilineInput(prompt string) (string, error) {
 			ed.prevPhysicalRow = 0
 			ed.redraw()
 
-		case '\x03': // Ctrl+C -> сброс текущего ввода
+		case '\x03': // Ctrl+C -> сброс текущего ввода или выход, если строка пуста
+			if len(ed.runes) == 0 {
+				os.Stdout.WriteString("^C\r\n")
+				return "", io.EOF
+			}
 			os.Stdout.WriteString("^C\r\n")
 			ed.runes = nil
 			ed.cursorPos = 0
@@ -1094,6 +1176,196 @@ func truncateOutput(s string, maxLen int) string {
 	return s[:maxLen] + fmt.Sprintf("\n\n... [вывод обрезан: показаны первые %d байт из %d]", maxLen, len(s))
 }
 
+// === Мультимодальная обработка изображений ===
+
+func isImageFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(path)))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico", ".tiff":
+		return true
+	}
+	return false
+}
+
+func isBinaryContent(data []byte) bool {
+	checkLen := len(data)
+	if checkLen > 512 {
+		checkLen = 512
+	}
+	for i := 0; i < checkLen; i++ {
+		if data[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func getImageMimeType(path string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(path)))
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".bmp":
+		return "image/bmp"
+	case ".ico":
+		return "image/x-icon"
+	case ".tiff":
+		return "image/tiff"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func extractCandidatePaths(input string) []string {
+	var candidates []string
+
+	// 1. Пути в кавычках: "..." или '...'
+	quotedRe := regexp.MustCompile(`["']([^"']+)["']`)
+	for _, m := range quotedRe.FindAllStringSubmatch(input, -1) {
+		candidates = append(candidates, strings.TrimSpace(m[1]))
+	}
+
+	// 2. Пути с расширениями изображений (Windows пути, Unix пути, относительные)
+	extRe := regexp.MustCompile(`(?i)(?:[a-zA-Z]:[\\/]|/|[.~]?[\\/]|\\b)[\w\-. \\/{}()]+\.(?:png|jpg|jpeg|webp|gif|bmp|ico|tiff)`)
+	for _, match := range extRe.FindAllString(input, -1) {
+		trimmed := strings.TrimSpace(match)
+		already := false
+		for _, c := range candidates {
+			if strings.EqualFold(c, trimmed) {
+				already = true
+				break
+			}
+		}
+		if !already {
+			candidates = append(candidates, trimmed)
+		}
+	}
+
+	// 3. Токены, разделенные пробелами
+	for _, field := range strings.Fields(input) {
+		fieldClean := strings.Trim(field, `"'()[]{}<>,;`)
+		if isImageFile(fieldClean) {
+			already := false
+			for _, c := range candidates {
+				if strings.EqualFold(c, fieldClean) {
+					already = true
+					break
+				}
+			}
+			if !already {
+				candidates = append(candidates, fieldClean)
+			}
+		}
+	}
+
+	return candidates
+}
+
+func findValidImages(input string) []string {
+	candidates := extractCandidatePaths(input)
+	var validImages []string
+	seen := make(map[string]bool)
+
+	for _, cand := range candidates {
+		clean := filepath.Clean(cand)
+		if seen[clean] {
+			continue
+		}
+		info, err := os.Stat(clean)
+		if err == nil && !info.IsDir() && isImageFile(clean) {
+			seen[clean] = true
+			validImages = append(validImages, clean)
+		}
+	}
+
+	return validImages
+}
+
+func buildMultimodalMessageContent(input string) (interface{}, error) {
+	trimmed := strings.TrimSpace(input)
+	promptText := input
+	var explicitPath string
+	if strings.HasPrefix(trimmed, "/image") || strings.HasPrefix(trimmed, "/img") {
+		parts := strings.SplitN(trimmed, " ", 3)
+		if len(parts) >= 2 {
+			explicitPath = strings.Trim(parts[1], `"'`)
+			if len(parts) >= 3 {
+				promptText = strings.TrimSpace(parts[2])
+			} else {
+				promptText = "Опишите это изображение и ответьте на любые детали."
+			}
+		}
+	}
+
+	validImages := findValidImages(input)
+	if explicitPath != "" {
+		clean := filepath.Clean(explicitPath)
+		if info, err := os.Stat(clean); err == nil && !info.IsDir() {
+			already := false
+			for _, v := range validImages {
+				if strings.EqualFold(v, clean) {
+					already = true
+					break
+				}
+			}
+			if !already {
+				validImages = append([]string{clean}, validImages...)
+			}
+		} else {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Файл изображения не найден: %s\n", explicitPath)
+		}
+	}
+
+	if len(validImages) == 0 {
+		return &input, nil
+	}
+
+	var parts []ContentPart
+	if promptText != "" {
+		parts = append(parts, ContentPart{
+			Type: "text",
+			Text: promptText,
+		})
+	}
+
+	const maxImageBytes = 20 * 1024 * 1024 // 20 МБ
+	for _, imgPath := range validImages {
+		data, err := os.ReadFile(imgPath)
+		if err != nil {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось прочитать изображение %s: %v\n", imgPath, err)
+			continue
+		}
+		if len(data) > maxImageBytes {
+			fmt.Printf("\033[33m[Предупреждение]\033[0m Изображение %s превышает 20 МБ, пропускаем.\n", imgPath)
+			continue
+		}
+
+		mimeType := getImageMimeType(imgPath)
+		b64 := base64.StdEncoding.EncodeToString(data)
+		dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
+
+		parts = append(parts, ContentPart{
+			Type: "image_url",
+			ImageURL: &ImageURL{
+				URL: dataURL,
+			},
+		})
+		fmt.Printf("\033[36m[Изображение]\033[0m Прикреплено: %s (%.1f КБ)\n", imgPath, float64(len(data))/1024.0)
+	}
+
+	if len(parts) == 1 && parts[0].Type == "text" {
+		return &input, nil
+	}
+
+	return parts, nil
+}
+
 // === Реализация базовых системных вызовов ===
 
 func readFile(path string) string {
@@ -1101,6 +1373,13 @@ func readFile(path string) string {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Sprintf("ОШИБКА чтения: %v", err)
+	}
+	if isImageFile(path) || isBinaryContent(content) {
+		ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
+		if ext == "" {
+			ext = "БИНАРНЫЙ"
+		}
+		return fmt.Sprintf("[Файл %s является изображением/бинарным файлом (%s, размер: %d байт). Чтобы передать изображение модели, укажите путь к нему в вашем сообщении или используйте команду /image.]", path, ext, len(content))
 	}
 	return truncateOutput(string(content), 48000)
 }
@@ -1439,7 +1718,7 @@ type StreamChunk struct {
 	Usage *Usage `json:"usage"`
 }
 
-func callAPINonStream(cfg Config, messages []Message, allowTools bool) (*ChatCompletionResponse, error) {
+func callAPINonStream(ctx context.Context, cfg Config, messages []Message, allowTools bool) (*ChatCompletionResponse, error) {
 	reqBody := ChatCompletionRequest{
 		Model:    cfg.Model,
 		Messages: messages,
@@ -1453,7 +1732,7 @@ func callAPINonStream(cfg Config, messages []Message, allowTools bool) (*ChatCom
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", cfg.URL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.URL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}
@@ -1486,7 +1765,7 @@ func callAPINonStream(cfg Config, messages []Message, allowTools bool) (*ChatCom
 	return &chatResp, nil
 }
 
-func callAPIStream(cfg Config, messages []Message, allowTools bool) (*ChatCompletionResponse, error) {
+func callAPIStream(ctx context.Context, cfg Config, messages []Message, allowTools bool) (*ChatCompletionResponse, error) {
 	reqMap := map[string]interface{}{
 		"model":    cfg.Model,
 		"messages": messages,
@@ -1501,12 +1780,12 @@ func callAPIStream(cfg Config, messages []Message, allowTools bool) (*ChatComple
 
 	jsonData, err := json.Marshal(reqMap)
 	if err != nil {
-		return callAPINonStream(cfg, messages, allowTools)
+		return callAPINonStream(ctx, cfg, messages, allowTools)
 	}
 
-	req, err := http.NewRequest("POST", cfg.URL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.URL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return callAPINonStream(cfg, messages, allowTools)
+		return callAPINonStream(ctx, cfg, messages, allowTools)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -1523,7 +1802,7 @@ func callAPIStream(cfg Config, messages []Message, allowTools bool) (*ChatComple
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return callAPINonStream(cfg, messages, allowTools)
+		return callAPINonStream(ctx, cfg, messages, allowTools)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -1536,6 +1815,11 @@ func callAPIStream(cfg Config, messages []Message, allowTools bool) (*ChatComple
 	var printedHeader bool
 
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
@@ -1620,7 +1904,7 @@ func callAPIStream(cfg Config, messages []Message, allowTools bool) (*ChatComple
 	}
 
 	if fullContent.Len() == 0 && len(orderedToolCalls) == 0 {
-		return callAPINonStream(cfg, messages, allowTools)
+		return callAPINonStream(ctx, cfg, messages, allowTools)
 	}
 
 	return &ChatCompletionResponse{
@@ -1683,25 +1967,29 @@ func saveMarkdownLog(messages []Message, model string, url string) {
 	sb.WriteString("---\n\n")
 
 	for _, msg := range messages {
+		text := msg.GetText()
 		switch msg.Role {
 		case "system":
 			sb.WriteString("### ⚙️ Системные настройки (System)\n")
-			if msg.Content != nil {
-				sb.WriteString(fmt.Sprintf("> %s\n\n", *msg.Content))
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("> %s\n\n", text))
 			} else {
 				sb.WriteString("> [Пустой промпт]\n\n")
 			}
 		case "user":
 			sb.WriteString("### 👤 Пользователь (User)\n")
-			if msg.Content != nil {
-				sb.WriteString(fmt.Sprintf("%s\n\n", *msg.Content))
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("%s\n\n", text))
 			} else {
 				sb.WriteString("\n\n")
 			}
+			if msg.HasImages() {
+				sb.WriteString("*(Прикреплено изображение)*\n\n")
+			}
 		case "assistant":
 			sb.WriteString("### 🤖 ИИ-Агент (Assistant)\n")
-			if msg.Content != nil && *msg.Content != "" {
-				sb.WriteString(fmt.Sprintf("%s\n\n", *msg.Content))
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("%s\n\n", text))
 			}
 			if len(msg.ToolCalls) > 0 {
 				sb.WriteString("**Запрошенные действия:**\n")
@@ -1722,10 +2010,10 @@ func saveMarkdownLog(messages []Message, model string, url string) {
 		case "tool":
 			sb.WriteString(fmt.Sprintf("### 🛠️ Результат инструмента `%s` (Tool)\n", msg.Name))
 			sb.WriteString(fmt.Sprintf("- **Tool Call ID:** `%s`\n", msg.ToolCallID))
-			if msg.Content != nil {
+			if text != "" {
 				sb.WriteString("```\n")
-				sb.WriteString(*msg.Content)
-				if !strings.HasSuffix(*msg.Content, "\n") {
+				sb.WriteString(text)
+				if !strings.HasSuffix(text, "\n") {
 					sb.WriteString("\n")
 				}
 				sb.WriteString("```\n\n")
@@ -1734,8 +2022,8 @@ func saveMarkdownLog(messages []Message, model string, url string) {
 			}
 		default:
 			sb.WriteString(fmt.Sprintf("### 📝 [%s]\n", strings.ToUpper(msg.Role)))
-			if msg.Content != nil {
-				sb.WriteString(fmt.Sprintf("%s\n\n", *msg.Content))
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("%s\n\n", text))
 			}
 		}
 	}
@@ -1993,9 +2281,10 @@ func pruneContext(messages []Message, contextLimit int, currentTokens int, force
 
 	for i := 1; i < endIdx; i++ {
 		if messages[i].Role == "tool" && messages[i].Content != nil {
-			if len(*messages[i].Content) > 200 {
-				newContent := (*messages[i].Content)[:120] + "\n... [вывод инструмента сжат для экономии контекста]"
-				messages[i].Content = &newContent
+			text := messages[i].GetText()
+			if len(text) > 200 {
+				newContent := text[:120] + "\n... [вывод инструмента сжат для экономии контекста]"
+				messages[i].SetText(newContent)
 				prunedCount++
 			}
 		}
@@ -2228,6 +2517,7 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 	case "/help":
 		fmt.Println("\n\033[1;36m================ Доступные команды ================\033[0m")
 		fmt.Println("  \033[1m? <текст>\033[0m       - Режим консультации: только ответ без выполнения действий")
+		fmt.Println("  \033[1m/image <путь>\033[0m   - Анализ изображения (также работает при указании пути в сообщении)")
 		fmt.Println("  \033[1m/help\033[0m           - Показать эту справку")
 		fmt.Println("  \033[1m/update\033[0m         - Проверить и установить обновление с GitHub")
 		fmt.Println("  \033[1m/version\033[0m        - Показать текущую версию программы")
@@ -2235,7 +2525,7 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		fmt.Println("  \033[1m/model\033[0m          - Показать список моделей или сменить (/model <имя|номер>)")
 		fmt.Println("  \033[1m/compact\033[0m        - Вручную сжать старые вызовы инструментов в контексте")
 		fmt.Println("  \033[1m/tokens, /stats\033[0m - Показать статистику использования контекста и токенов")
-		fmt.Println("  \033[1m/exit, /quit\033[0m    - Выход из программы")
+		fmt.Println("  \033[1m/exit, /quit\033[0m    - Выход из программы (или Ctrl+C на пустой строке)")
 		fmt.Printf("\033[1;36m====================================================\033[0m\n\n")
 		return true
 
@@ -2594,10 +2884,14 @@ func main() {
 				messages = loadedMessages
 				fmt.Println("\n--- Восстановление истории сообщений ---")
 				for _, m := range messages {
-					if m.Role == "user" && m.Content != nil {
-						fmt.Printf("\033[1;32mUser >>>\033[0m %s\n", *m.Content)
-					} else if m.Role == "assistant" && m.Content != nil && *m.Content != "" {
-						fmt.Printf("\033[1;35mИИ >>>\033[0m %s\n", *m.Content)
+					text := m.GetText()
+					if m.Role == "user" && text != "" {
+						fmt.Printf("\033[1;32mUser >>>\033[0m %s\n", text)
+						if m.HasImages() {
+							fmt.Println("\033[36m[Изображение прикреплено]\033[0m")
+						}
+					} else if m.Role == "assistant" && text != "" {
+						fmt.Printf("\033[1;35mИИ >>>\033[0m %s\n", text)
 					}
 				}
 				fmt.Printf("--- Сессия успешно восстановлена ---\n\n")
@@ -2642,7 +2936,13 @@ func main() {
 			fmt.Println("\033[36m[Режим консультации]\033[0m Инструменты отключены (только текстовый ответ).")
 		}
 
-		messages = append(messages, Message{Role: "user", Content: &userInput})
+		userContent, err := buildMultimodalMessageContent(userInput)
+		if err != nil {
+			fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось обработать сообщение: %v\n", err)
+			continue
+		}
+
+		messages = append(messages, Message{Role: "user", Content: userContent})
 		saveSession(messages)
 		saveMarkdownLog(messages, cfg.Model, cfg.URL)
 
@@ -2653,8 +2953,28 @@ func main() {
 			messages, _ = pruneContext(messages, limit, lastUsage.TotalTokens, false)
 
 			fmt.Println("\033[2m[ИИ] Думает...\033[0m")
-			response, err := callAPIStream(cfg, messages, allowTools)
+
+			// Перехват Ctrl+C во время генерации ответа модели
+			reqCtx, cancelReq := context.WithCancel(context.Background())
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt)
+			go func() {
+				select {
+				case <-sigCh:
+					cancelReq()
+				case <-reqCtx.Done():
+				}
+			}()
+
+			response, err := callAPIStream(reqCtx, cfg, messages, allowTools)
+			signal.Stop(sigCh)
+			cancelReq()
+
 			if err != nil {
+				if errors.Is(err, context.Canceled) || reqCtx.Err() == context.Canceled {
+					fmt.Println("\n\033[33m[Прервано пользователем (Ctrl+C)]\033[0m")
+					break
+				}
 				fmt.Printf("\033[31m[ОШИБКА]\033[0m Не удалось связаться с API: %v\n", err)
 				break
 			}

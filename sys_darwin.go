@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -92,11 +94,25 @@ func executeCmd(command string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	cmd := exec.CommandContext(ctx, shell, "-c", command)
 	output, err := cmd.CombinedOutput()
 
 	var exitCode int
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return fmt.Sprintf("ОШИБКА: Выполнение команды прервано пользователем (Ctrl+C).\nЧастичный вывод:\n%s", truncateOutput(string(output), 16000))
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Sprintf("ОШИБКА: Превышен таймаут выполнения команды (2 мин).\nЧастичный вывод:\n%s", truncateOutput(string(output), 16000))
 		}

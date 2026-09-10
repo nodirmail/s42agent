@@ -5,6 +5,7 @@ session.md
 
 # Compiled Binaries
 agent
+agentd
 agent.exe
 *.exe
 *.exe~

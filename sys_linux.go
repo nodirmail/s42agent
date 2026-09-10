@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,14 +22,15 @@ func prepareRawTerminal(fd int) {
 }
 
 func getPlatformName() string {
-	return "Linux AI Agent"
+	return "Linux Recovery AI Agent"
 }
 
 func getDefaultSystemPrompt() string {
-	return "You are a terminal AI assistant for Linux system administration, diagnostics, and recovery. " +
-		"Your task is to diagnose and resolve system issues using the provided tools. " +
-		"Detect the Linux distribution and leverage native utilities (e.g., systemctl, journalctl, package managers). " +
-		"Save all temporary and executable files/scripts in /tmp, /var/tmp, or the current working directory. Avoid modifying critical system paths (/etc/shadow, /boot, /etc/sudoers) unsafely. " +
+	return "You are a terminal AI assistant for Linux administration, diagnostics, and recovery. " +
+		"Your task is to diagnose and fix system issues using the provided tools. " +
+		"Use standard tools like systemctl, journalctl, dmesg, ip, ss, ps, top, and official package managers (apt, dnf, pacman, yum). " +
+		"Save all temporary files, scripts, and downloaded packages in /tmp or the current working directory, never directly in / or system binaries paths. " +
+		"Never modify critical security or system files like /etc/shadow, /etc/passwd, or /boot directly without strict confirmation. " +
 		"Always respond concisely, to the point, and in the language used by the user."
 }
 
@@ -37,13 +40,13 @@ func getSysTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "execute_cmd",
-				Description: "Выполнить bash-команду в Linux через /bin/bash -c. Требует явного подтверждения пользователя.",
+				Description: "Выполнить команду в Linux через bash/sh. Требует явного подтверждения пользователя.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"command": map[string]interface{}{
 							"type":        "string",
-							"description": "Команда Linux (например, 'ls -la /', 'df -h', 'systemctl status nginx').",
+							"description": "Команда для выполнения (например, 'systemctl status nginx', 'df -h').",
 						},
 					},
 					"required": []string{"command"},
@@ -54,7 +57,7 @@ func getSysTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "get_sys_env",
-				Description: "Получить системную информацию Linux (версия ядра, дистрибутив, свободное место, права root).",
+				Description: "Получить системную информацию Linux (дистрибутив, ядро, диски, права root).",
 				Parameters: map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},
@@ -65,7 +68,7 @@ func getSysTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "get_windows_env",
-				Description: "Псевдоним для get_sys_env (для совместимости с имеющимися сессиями).",
+				Description: "Псевдоним для get_sys_env для обратной совместимости.",
 				Parameters: map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},
@@ -90,11 +93,25 @@ func executeCmd(command string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	cmd := exec.CommandContext(ctx, shell, "-c", command)
 	output, err := cmd.CombinedOutput()
 
 	var exitCode int
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return fmt.Sprintf("ОШИБКА: Выполнение команды прервано пользователем (Ctrl+C).\nЧастичный вывод:\n%s", truncateOutput(string(output), 16000))
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Sprintf("ОШИБКА: Превышен таймаут выполнения команды (2 мин).\nЧастичный вывод:\n%s", truncateOutput(string(output), 16000))
 		}

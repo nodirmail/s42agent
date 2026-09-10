@@ -1,7 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -257,6 +262,117 @@ func TestIsNewerVersion(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tt.latest, tt.current, got, tt.want)
 		}
+	}
+}
+
+func TestMultimodalMessage(t *testing.T) {
+	// 1. Text message
+	text := "Hello world"
+	msgText := Message{Role: "user", Content: &text}
+	if msgText.GetText() != "Hello world" {
+		t.Fatalf("expected 'Hello world', got %q", msgText.GetText())
+	}
+	if msgText.HasImages() {
+		t.Fatalf("expected HasImages to be false")
+	}
+
+	// 2. Multimodal message
+	parts := []ContentPart{
+		{Type: "text", Text: "What is this?"},
+		{Type: "image_url", ImageURL: &ImageURL{URL: "data:image/png;base64,iVBORw0KGgo="}},
+	}
+	msgMM := Message{Role: "user", Content: parts}
+	if msgMM.GetText() != "What is this?" {
+		t.Fatalf("expected 'What is this?', got %q", msgMM.GetText())
+	}
+	if !msgMM.HasImages() {
+		t.Fatalf("expected HasImages to be true")
+	}
+
+	// 3. JSON roundtrip
+	data, err := json.Marshal(msgMM)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var restored Message
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if restored.GetText() != "What is this?" {
+		t.Fatalf("expected restored text 'What is this?', got %q", restored.GetText())
+	}
+	if !restored.HasImages() {
+		t.Fatalf("expected restored HasImages to be true")
+	}
+}
+
+func TestExtractCandidatePaths(t *testing.T) {
+	input := `C:\Users\Admin\AppData\Local\ScreenClip\{7C75D918-D6BF-4CA4-905D-B25740C36D03}.png что здесь нужно выбрать?`
+	candidates := extractCandidatePaths(input)
+	found := false
+	for _, c := range candidates {
+		if strings.Contains(c, "{7C75D918-D6BF-4CA4-905D-B25740C36D03}.png") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected to find Windows screenshot path in candidates: %v", candidates)
+	}
+
+	inputQuoted := `Посмотри на "my test image.jpg" и скажи ответ`
+	candidatesQuoted := extractCandidatePaths(inputQuoted)
+	foundQuoted := false
+	for _, c := range candidatesQuoted {
+		if c == "my test image.jpg" {
+			foundQuoted = true
+			break
+		}
+	}
+	if !foundQuoted {
+		t.Fatalf("expected to find quoted path in candidates: %v", candidatesQuoted)
+	}
+}
+
+func TestBuildMultimodalMessageContentWithTempFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	imgFile := filepath.Join(tmpDir, "test_screenshot.png")
+	// Minimal valid PNG header
+	pngData := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4")
+	if err := os.WriteFile(imgFile, pngData, 0644); err != nil {
+		t.Fatalf("failed to write temp png: %v", err)
+	}
+
+	prompt := fmt.Sprintf("%s что на этой картинке?", imgFile)
+	content, err := buildMultimodalMessageContent(prompt)
+	if err != nil {
+		t.Fatalf("buildMultimodalMessageContent error: %v", err)
+	}
+
+	parts, ok := content.([]ContentPart)
+	if !ok {
+		t.Fatalf("expected []ContentPart, got %T", content)
+	}
+
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts (text + image), got %d", len(parts))
+	}
+	if parts[0].Type != "text" {
+		t.Fatalf("expected first part to be text, got %q", parts[0].Type)
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil {
+		t.Fatalf("expected second part to be image_url, got %+v", parts[1])
+	}
+	if !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/png;base64,") {
+		t.Fatalf("expected data:image/png;base64 prefix, got %q", parts[1].ImageURL.URL)
+	}
+
+	// Test readFile protection
+	result := readFile(imgFile)
+	if !strings.Contains(result, "является изображением") {
+		t.Fatalf("expected readFile to detect image, got %q", result)
 	}
 }
 
