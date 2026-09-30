@@ -43,7 +43,21 @@ Built with pure Go, it requires no heavy runtime dependencies (no Python, no Nod
 
 ## 📥 Installation & Quick Start
 
-### 1. Download Pre-built Binaries
+### ⚡ One-Line Install (Recommended)
+
+**Linux / macOS (Bash):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.ps1 | iex
+```
+
+---
+
+### Manual Download Pre-built Binaries
 
 Download ready-to-run binaries directly from [GitHub Releases](https://github.com/nodirmail/s42agent/releases) for your OS and architecture:
 
