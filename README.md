@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/ins
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.ps1 | iex
 ```
 
 ---

@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/ins
 
 ### Windows (PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.ps1 | iex
 ```
 
 ---
@@ -38,7 +38,7 @@ curl -fsSL https://nodirmail.github.io/s42agent/install/install.sh | bash
 ```
 или для Windows:
 ```powershell
-irm https://nodirmail.github.io/s42agent/install/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://nodirmail.github.io/s42agent/install/install.ps1 | iex
 ```
 
 ---
