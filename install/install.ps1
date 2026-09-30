@@ -3,6 +3,7 @@
 # ==============================================================================
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 $repo = "nodirmail/s42agent"
 $binaryName = "s42agent"
@@ -24,17 +25,17 @@ Write-Host "Платформа: windows/$arch" -ForegroundColor Green
 Write-Host "Файл релиза: $assetName" -ForegroundColor Gray
 
 # 2. Каталог установки в профиле пользователя (не требует прав администратора)
-$installDir = Join-Path $env:LOCALAPPDATA "Programs" "s42agent"
+$installDir = "$env:LOCALAPPDATA\Programs\s42agent"
 if (-not (Test-Path $installDir)) {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 }
 
-$targetExe = Join-Path $installDir "${binaryName}.exe"
-$aliasExe  = Join-Path $installDir "agent.exe"
+$targetExe = "$installDir\${binaryName}.exe"
+$aliasExe  = "$installDir\agent.exe"
 
 # 3. Скачивание
 Write-Host "⬇️  Загрузка из GitHub Releases..." -ForegroundColor Gray
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 try {
     Invoke-WebRequest -Uri $downloadUrl -OutFile $targetExe -UseBasicParsing
@@ -47,8 +48,10 @@ try {
 
 # 4. Добавление каталога в пользовательский PATH (если еще не добавлен)
 $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -split ';' -notcontains $installDir) {
-    $newUserPath = if ([string]::IsNullOrEmpty($userPath)) { $installDir } else { "$userPath;$installDir" }
+if (-not $userPath) { $userPath = "" }
+$paths = $userPath -split ';' | Where-Object { $_ -ne "" }
+if ($paths -notcontains $installDir) {
+    $newUserPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
     [System.Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
     $env:Path = "$env:Path;$installDir"
     Write-Host "ℹ️  Каталог $installDir добавлен в системный PATH пользователя." -ForegroundColor Yellow
