@@ -2791,9 +2791,11 @@ func main() {
 		}
 	}
 
+	configFound := false
 	if _, err := os.Stat(cfgPath); err == nil {
 		if fileCfg, err := loadConfigFromFile(cfgPath); err == nil {
 			cfg = fileCfg
+			configFound = true
 		}
 	}
 
@@ -2826,10 +2828,19 @@ func main() {
 	cfg.Key = strings.TrimSpace(cfg.Key)
 	cfg.Model = strings.TrimSpace(cfg.Model)
 
+	firstRun := !configFound || cfg.URL == ""
+
 	if listModelsRequested {
 		if cfg.URL == "" {
 			cfg.URL = readLineWithPromptExitOnError("Введите адрес API: ")
 			cfg.URL = strings.TrimSpace(cfg.URL)
+		}
+		if cfg.URL != "" && !strings.HasPrefix(cfg.URL, "http://") && !strings.HasPrefix(cfg.URL, "https://") {
+			cfg.URL = "http://" + cfg.URL
+		}
+		if cfg.Key == "" && *keyFlag == "" && os.Getenv("AI_API_KEY") == "" {
+			cfg.Key = readLineWithPromptExitOnError("Введите API Key (нажмите Enter, если ключ не требуется): ")
+			cfg.Key = strings.TrimSpace(cfg.Key)
 		}
 		fmt.Printf("\nПолучение списка моделей с %s...\n", cfg.URL)
 		models, err := fetchModels(cfg.URL, cfg.Key)
@@ -2852,8 +2863,16 @@ func main() {
 	}
 
 	if cfg.URL == "" {
-		cfg.URL = readLineWithPromptExitOnError("Введите адрес API: ")
+		cfg.URL = readLineWithPromptExitOnError("Введите адрес API (например, http://localhost:1234/v1 или https://api.openai.com/v1): ")
 		cfg.URL = strings.TrimSpace(cfg.URL)
+	}
+	if cfg.URL != "" && !strings.HasPrefix(cfg.URL, "http://") && !strings.HasPrefix(cfg.URL, "https://") {
+		cfg.URL = "http://" + cfg.URL
+	}
+
+	if firstRun && cfg.Key == "" && *keyFlag == "" && os.Getenv("AI_API_KEY") == "" {
+		cfg.Key = readLineWithPromptExitOnError("Введите API Key (нажмите Enter, если ключ не требуется): ")
+		cfg.Key = strings.TrimSpace(cfg.Key)
 	}
 
 	// Если передана цифра/номер модели, преобразуем её в имя модели из списка
@@ -2874,6 +2893,7 @@ func main() {
 	}
 
 	if cfg.Model == "" {
+		fmt.Printf("\nПолучение списка доступных моделей с %s...\n", cfg.URL)
 		models, err := fetchModels(cfg.URL, cfg.Key)
 		if err == nil && len(models) > 0 {
 			fmt.Println("\n=======================================================")
@@ -2883,16 +2903,28 @@ func main() {
 				fmt.Printf("  %2d) %s\n", i+1, m)
 			}
 			fmt.Println("=======================================================")
-			input := readLineWithPromptExitOnError(fmt.Sprintf("Введите имя модели или номер (1-%d): ", len(models)))
+			prompt := fmt.Sprintf("Введите номер модели (1-%d) или имя [по умолчанию 1: %s]: ", len(models), models[0])
+			input := readLineWithPromptExitOnError(prompt)
 			input = strings.TrimSpace(input)
-			var chosenIdx int
-			if n, err := fmt.Sscanf(input, "%d", &chosenIdx); err == nil && n == 1 && chosenIdx >= 1 && chosenIdx <= len(models) {
-				cfg.Model = models[chosenIdx-1]
+			if input == "" {
+				cfg.Model = models[0]
 			} else {
-				cfg.Model = input
+				var chosenIdx int
+				if n, err := fmt.Sscanf(input, "%d", &chosenIdx); err == nil && n == 1 && chosenIdx >= 1 && chosenIdx <= len(models) {
+					cfg.Model = models[chosenIdx-1]
+				} else {
+					cfg.Model = input
+				}
 			}
+			fmt.Printf("[Модель] Выбрана: %s\n\n", cfg.Model)
 		} else {
-			cfg.Model = readLineWithPromptExitOnError("Введите имя модели: ")
+			if err != nil {
+				fmt.Printf("\033[33m[Предупреждение]\033[0m Не удалось автоматически получить список моделей: %v\n", err)
+			}
+			for cfg.Model == "" {
+				input := readLineWithPromptExitOnError("Введите имя модели: ")
+				cfg.Model = strings.TrimSpace(input)
+			}
 		}
 		cfg.Model = strings.TrimSpace(cfg.Model)
 	}
