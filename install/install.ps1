@@ -46,18 +46,45 @@ try {
     exit 1
 }
 
-# 4. Добавление каталога в пользовательский PATH (если еще не добавлен)
+# 4. Добавление каталога в PATH
+# 4.1. Всегда обновляем PATH текущей сессии, чтобы команды работали сразу же
+if (($env:Path -split ';') -notcontains $installDir) {
+    $env:Path = "$installDir;$env:Path"
+}
+
+# 4.2. Регистрируем алиасы для текущей сессии PowerShell
+Set-Alias -Name s42agent -Value "$targetExe" -Scope Global -Force -ErrorAction SilentlyContinue
+Set-Alias -Name agent -Value "$aliasExe" -Scope Global -Force -ErrorAction SilentlyContinue
+
+# 4.3. Сохраняем в постоянный User PATH
 $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
 if (-not $userPath) { $userPath = "" }
 $paths = $userPath -split ';' | Where-Object { $_ -ne "" }
 if ($paths -notcontains $installDir) {
     $newUserPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
     [System.Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-    $env:Path = "$env:Path;$installDir"
-    Write-Host "ℹ️  Каталог $installDir добавлен в системный PATH пользователя." -ForegroundColor Yellow
+    Write-Host "ℹ️  Каталог добавлен в пользовательский PATH." -ForegroundColor Yellow
+}
+
+# 4.4. Если скрипт запущен от имени Администратора (например, на Windows Server) — добавляем и в системный Machine PATH
+try {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsPrincipal]::WindowsBuiltInRole.Administrator)
+    if ($isAdmin) {
+        $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+        if (-not $machinePath) { $machinePath = "" }
+        $mPaths = $machinePath -split ';' | Where-Object { $_ -ne "" }
+        if ($mPaths -notcontains $installDir) {
+            $newMachinePath = if ($machinePath) { "$machinePath;$installDir" } else { $installDir }
+            [System.Environment]::SetEnvironmentVariable("Path", $newMachinePath, "Machine")
+            Write-Host "ℹ️  Каталог добавлен в общесистемный (Machine) PATH." -ForegroundColor Yellow
+        }
+    }
+} catch {
+    # Игнорируем ошибки доступа к системному реестру
 }
 
 Write-Host "✅ SA42Agent успешно установлен в: $targetExe" -ForegroundColor Green
 Write-Host ""
 & $targetExe -version
-Write-Host "Для запуска откройте новый терминал и введите: s42agent (или agent)" -ForegroundColor Gray
+Write-Host "Теперь вы можете использовать команду: s42agent (или agent)" -ForegroundColor Gray
+

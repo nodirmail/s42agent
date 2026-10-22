@@ -41,10 +41,24 @@ case "$ARCH" in
 esac
 
 ASSET_NAME="${BINARY_NAME}-${TARGET_OS}-${TARGET_ARCH}"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+
+VERSION="${1:-${VERSION:-}}"
+if [ -z "$VERSION" ]; then
+  # Определяем самый свежий тег (включая beta / pre-release)
+  DETECTED_TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" 2>/dev/null | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
+  if [ -n "$DETECTED_TAG" ]; then
+    VERSION="$DETECTED_TAG"
+  fi
+fi
+
+if [ -n "$VERSION" ] && [ "$VERSION" != "latest" ]; then
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_NAME}"
+else
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+fi
 
 echo -e "Платформа: ${C_GREEN}${TARGET_OS}/${TARGET_ARCH}${C_RESET}"
-echo -e "Файл релиза: ${C_GRAY}${ASSET_NAME}${C_RESET}"
+echo -e "Файл релиза: ${C_GRAY}${ASSET_NAME}${C_RESET} ${VERSION:+(версия $VERSION)}"
 
 # 3. Выбор каталога для установки
 if [ "$EUID" -eq 0 ]; then

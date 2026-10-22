@@ -26,7 +26,7 @@ import (
 )
 
 var (
-	AppVersion = "v1.0.6"
+	AppVersion = "v1.0.7-beta"
 	GitHubRepo = "nodirmail/s42agent"
 )
 
@@ -2198,7 +2198,7 @@ func fetchModels(apiURL string, apiKey string) ([]string, error) {
 	}
 	req.Header.Set("User-Agent", "sa42agent")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil || (resp != nil && resp.StatusCode == http.StatusNotFound && strings.HasSuffix(endpoint, "/v1/models")) {
 		if resp != nil {

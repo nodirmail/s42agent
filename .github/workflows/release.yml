@@ -46,7 +46,7 @@ jobs:
             fi
             
             echo "Building for $GOOS/$GOARCH -> $OUTPUT_NAME"
-            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-s -w" -o "dist/$OUTPUT_NAME" .
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-s -w" -o "dist/$OUTPUT_NAME" .
           done
           
           cd dist
@@ -61,4 +61,4 @@ jobs:
             dist/*
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
