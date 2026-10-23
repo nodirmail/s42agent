@@ -26,7 +26,7 @@ import (
 )
 
 var (
-	AppVersion = "v1.0.7-beta"
+	AppVersion = "v1.0.8"
 	GitHubRepo = "nodirmail/s42agent"
 )
 
@@ -160,6 +160,7 @@ type Config struct {
 	Key          string `json:"key"`
 	Model        string `json:"model"`
 	ContextLimit int    `json:"context_limit,omitempty"`
+	Language     string `json:"language,omitempty"`
 }
 
 var autoApprove bool
@@ -2169,6 +2170,155 @@ func resolveContextLimit(cfg *Config) int {
 	return cfg.ContextLimit
 }
 
+func parseContextLimit(s string) (int, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0, fmt.Errorf("пустое значение")
+	}
+
+	for _, suffix := range []string{"tokens", "token", "токенов", "токена", "токен"} {
+		s = strings.TrimSuffix(s, suffix)
+	}
+	s = strings.TrimSpace(s)
+
+	multiplier := 1
+	if strings.HasSuffix(s, "mib") || strings.HasSuffix(s, "mb") || strings.HasSuffix(s, "m") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "mib")
+		s = strings.TrimSuffix(s, "mb")
+		s = strings.TrimSuffix(s, "m")
+	} else if strings.HasSuffix(s, "kib") || strings.HasSuffix(s, "kb") || strings.HasSuffix(s, "k") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "kib")
+		s = strings.TrimSuffix(s, "kb")
+		s = strings.TrimSuffix(s, "k")
+	}
+
+	s = strings.TrimSpace(s)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("не удалось распознать размер контекста '%s'", s)
+	}
+	val := int(f * float64(multiplier))
+	if val <= 0 {
+		return 0, fmt.Errorf("размер контекста должен быть положительным числом")
+	}
+	return val, nil
+}
+
+func formatContextLimit(tokens int) string {
+	if tokens <= 0 {
+		return "0"
+	}
+	if tokens%1048576 == 0 {
+		return fmt.Sprintf("%d (%dM)", tokens, tokens/1048576)
+	}
+	if tokens%1024 == 0 {
+		return fmt.Sprintf("%d (%dk)", tokens, tokens/1024)
+	}
+	if tokens%1000 == 0 {
+		return fmt.Sprintf("%d (~%dk)", tokens, tokens/1000)
+	}
+	return fmt.Sprintf("%d", tokens)
+}
+
+func getLanguageName(code string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	names := map[string]string{
+		"ru": "Russian",
+		"en": "English",
+		"es": "Spanish",
+		"de": "German",
+		"fr": "French",
+		"it": "Italian",
+		"pt": "Portuguese",
+		"zh": "Chinese",
+		"ja": "Japanese",
+		"ko": "Korean",
+		"ar": "Arabic",
+		"hi": "Hindi",
+		"tr": "Turkish",
+		"uz": "Uzbek",
+		"kk": "Kazakh",
+		"uk": "Ukrainian",
+		"be": "Belarusian",
+		"pl": "Polish",
+		"nl": "Dutch",
+		"cs": "Czech",
+		"sv": "Swedish",
+		"fa": "Persian",
+		"he": "Hebrew",
+		"id": "Indonesian",
+		"vi": "Vietnamese",
+	}
+	if name, ok := names[code]; ok {
+		return name
+	}
+	return code
+}
+
+func getLanguageDisplayName(code string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	display := map[string]string{
+		"ru": "Русский (Russian)",
+		"en": "English",
+		"es": "Español (Spanish)",
+		"de": "Deutsch (German)",
+		"fr": "Français (French)",
+		"it": "Italiano (Italian)",
+		"pt": "Português (Portuguese)",
+		"zh": "中文 (Chinese)",
+		"ja": "日本語 (Japanese)",
+		"ko": "한국어 (Korean)",
+		"ar": "العربية (Arabic)",
+		"hi": "हिन्दी (Hindi)",
+		"tr": "Türkçe (Turkish)",
+		"uz": "O'zbek (Uzbek)",
+		"kk": "Қазақ (Kazakh)",
+		"uk": "Українська (Ukrainian)",
+		"be": "Беларуская (Belarusian)",
+		"pl": "Polski (Polish)",
+		"nl": "Nederlands (Dutch)",
+		"cs": "Čeština (Czech)",
+		"sv": "Svenska (Swedish)",
+		"fa": "فارسی (Persian)",
+		"he": "עברית (Hebrew)",
+		"id": "Bahasa Indonesia",
+		"vi": "Tiếng Việt (Vietnamese)",
+	}
+	if d, ok := display[code]; ok {
+		return d
+	}
+	return code
+}
+
+func buildSystemPrompt(lang string) string {
+	base := getDefaultSystemPrompt()
+	lang = strings.TrimSpace(lang)
+	if lang == "" || strings.EqualFold(lang, "auto") || strings.EqualFold(lang, "default") {
+		return base
+	}
+	langName := getLanguageName(lang)
+	replaceTarget := "Always respond concisely, to the point, and in the language used by the user."
+	langInstruction := fmt.Sprintf("Always respond concisely, to the point. Always reply in %s (language code: %s), regardless of the input language, unless explicitly requested otherwise by the user.", langName, lang)
+	if strings.Contains(base, replaceTarget) {
+		return strings.Replace(base, replaceTarget, langInstruction, 1)
+	}
+	return base + " " + langInstruction
+}
+
+func updateSessionSystemPrompt(messages *[]Message, lang string) {
+	if messages == nil {
+		return
+	}
+	newSysPrompt := buildSystemPrompt(lang)
+	if len(*messages) > 0 && (*messages)[0].Role == "system" {
+		(*messages)[0].Content = &newSysPrompt
+	} else {
+		*messages = append([]Message{{Role: "system", Content: &newSysPrompt}}, *messages...)
+	}
+}
+
 func getModelsEndpoint(apiURL string) string {
 	u := strings.TrimSpace(apiURL)
 	u = strings.TrimRight(u, "/")
@@ -2573,6 +2723,8 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		fmt.Println("\n\033[1;36m================ Доступные команды ================\033[0m")
 		fmt.Println("  \033[1m? <текст>\033[0m       - Режим консультации: только ответ без выполнения действий")
 		fmt.Println("  \033[1m/image <путь>\033[0m   - Анализ изображения (также работает при указании пути в сообщении)")
+		fmt.Println("  \033[1m/c [размер]\033[0m     - Размер контекста (например: /c 32k, /c 64k, /c 131072)")
+		fmt.Println("  \033[1m/l [код]\033[0m        - Приоритет языка (например: /l ru, /l en, /l auto для сброса)")
 		fmt.Println("  \033[1m/help\033[0m           - Показать эту справку")
 		fmt.Println("  \033[1m/update\033[0m         - Проверить и установить обновление с GitHub")
 		fmt.Println("  \033[1m/version\033[0m        - Показать текущую версию программы")
@@ -2586,6 +2738,51 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 
 	case "/version":
 		fmt.Printf("\n\033[1;36mВерсия:\033[0m %s (%s/%s)\nРепозиторий: https://github.com/%s\n", AppVersion, runtime.GOOS, runtime.GOARCH, GitHubRepo)
+		return true
+
+	case "/c", "/context":
+		if len(parts) > 1 {
+			newLimit, err := parseContextLimit(parts[1])
+			if err != nil {
+				fmt.Printf("\n\033[31m[ОШИБКА]\033[0m %v. Пример: /c 32k или /c 131072\n", err)
+				return true
+			}
+			cfg.ContextLimit = newLimit
+			_ = saveConfigToFile(cfgPath, *cfg)
+			fmt.Printf("\n\033[1;32m[Контекст]\033[0m Лимит контекстного окна установлен: \033[1m%d\033[0m токенов (%s) и сохранен в конфигурации.\n", newLimit, formatContextLimit(newLimit))
+		} else {
+			limit := resolveContextLimit(cfg)
+			fmt.Printf("\n\033[1;36m[Контекст]\033[0m Текущий лимит контекстного окна: \033[1m%d\033[0m токенов (%s)\n", limit, formatContextLimit(limit))
+			fmt.Println("Используйте: /c <размер> для изменения (например: /c 32k, /c 64k, /c 131072).")
+		}
+		return true
+
+	case "/l", "/lang", "/language":
+		if len(parts) > 1 {
+			targetLang := strings.ToLower(strings.TrimSpace(parts[1]))
+			if targetLang == "auto" || targetLang == "default" || targetLang == "off" || targetLang == "none" || targetLang == "0" {
+				cfg.Language = ""
+				_ = saveConfigToFile(cfgPath, *cfg)
+				updateSessionSystemPrompt(messages, "")
+				saveSession(*messages)
+				saveMarkdownLog(*messages, cfg.Model, cfg.URL)
+				fmt.Println("\n\033[1;32m[Язык]\033[0m Приоритет языка сброшен на значение по умолчанию (ответ на языке вопроса). Настройка сохранена.")
+			} else {
+				cfg.Language = targetLang
+				_ = saveConfigToFile(cfgPath, *cfg)
+				updateSessionSystemPrompt(messages, cfg.Language)
+				saveSession(*messages)
+				saveMarkdownLog(*messages, cfg.Model, cfg.URL)
+				fmt.Printf("\n\033[1;32m[Язык]\033[0m Приоритетный язык установлен: \033[1m%s\033[0m (%s) и сохранен в конфигурации.\n", targetLang, getLanguageDisplayName(targetLang))
+			}
+		} else {
+			if cfg.Language == "" || strings.EqualFold(cfg.Language, "auto") || strings.EqualFold(cfg.Language, "default") {
+				fmt.Println("\n\033[1;36m[Язык]\033[0m Текущий приоритет языка: \033[1mпо умолчанию\033[0m (агент отвечает на языке вопроса).")
+			} else {
+				fmt.Printf("\n\033[1;36m[Язык]\033[0m Текущий приоритет языка: \033[1m%s\033[0m (%s)\n", cfg.Language, getLanguageDisplayName(cfg.Language))
+			}
+			fmt.Println("Используйте: /l <код_языка> (например: /l ru, /l en) или /l auto для сброса.")
+		}
 		return true
 
 	case "/update":
@@ -2615,7 +2812,7 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		return true
 
 	case "/clear", "/reset":
-		systemPrompt := getDefaultSystemPrompt()
+		systemPrompt := buildSystemPrompt(cfg.Language)
 		*messages = []Message{
 			{Role: "system", Content: &systemPrompt},
 		}
@@ -2666,17 +2863,14 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		return true
 
 	case "/tokens", "/stats":
-		limit := cfg.ContextLimit
-		if limit <= 0 {
-			limit = 262144
-		}
+		limit := resolveContextLimit(cfg)
 		fmt.Printf("\n\033[1;36m[Статистика]\033[0m Сообщений в сессии: %d\n", len(*messages))
 		if lastUsage != nil && lastUsage.TotalTokens > 0 {
 			percent := float64(lastUsage.TotalTokens) / float64(limit) * 100
-			fmt.Printf("Токены промпта: %d | Генерации: %d | Всего: %d/%d (%.1f%%)\n",
-				lastUsage.PromptTokens, lastUsage.CompletionTokens, lastUsage.TotalTokens, limit, percent)
+			fmt.Printf("Токены промпта: %d | Генерации: %d | Всего: %d/%s (%.1f%%)\n",
+				lastUsage.PromptTokens, lastUsage.CompletionTokens, lastUsage.TotalTokens, formatContextLimit(limit), percent)
 		} else {
-			fmt.Printf("Лимит контекста: %d токенов.\n", limit)
+			fmt.Printf("Лимит контекста: %s токенов.\n", formatContextLimit(limit))
 		}
 		return true
 
@@ -2732,7 +2926,10 @@ func main() {
 	keyFlag := flag.String("key", "", "API Key")
 	modelFlag := flag.String("model", "", "Model name")
 	configFlag := flag.String("config", "config.json", "Config file name")
-	limitFlag := flag.Int("context-limit", 0, "Max context window limit (default: 262144)")
+	contextFlag := flag.String("c", "", "Размер контекстного окна (например, 32k, 64k, 131072)")
+	limitFlag := flag.String("context-limit", "", "Размер контекстного окна (например, 32k, 64k, 131072)")
+	langFlag := flag.String("l", "", "Приоритетный язык ответов (код языка, например: ru, en)")
+	langLongFlag := flag.String("lang", "", "Приоритетный язык ответов (код языка, например: ru, en)")
 	autoApproveFlag := flag.Bool("A", false, "Автоматически одобрять все действия без подтверждения")
 	cleanFlag := flag.Bool("clean", false, "Начать новую чистую сессию, игнорируя сохраненную")
 	versionFlag := flag.Bool("version", false, "Показать версию программы")
@@ -2809,6 +3006,14 @@ func main() {
 	if envModel := os.Getenv("AI_MODEL"); envModel != "" && cfg.Model == "" {
 		cfg.Model = envModel
 	}
+	if envLimit := os.Getenv("AI_CONTEXT_LIMIT"); envLimit != "" && cfg.ContextLimit == 0 {
+		if parsed, err := parseContextLimit(envLimit); err == nil && parsed > 0 {
+			cfg.ContextLimit = parsed
+		}
+	}
+	if envLang := os.Getenv("AI_LANGUAGE"); envLang != "" && cfg.Language == "" {
+		cfg.Language = strings.ToLower(strings.TrimSpace(envLang))
+	}
 
 	// Перекрываем флагами
 	if *urlFlag != "" {
@@ -2820,8 +3025,39 @@ func main() {
 	if *modelFlag != "" {
 		cfg.Model = *modelFlag
 	}
-	if *limitFlag > 0 {
-		cfg.ContextLimit = *limitFlag
+
+	configChanged := false
+
+	limitRaw := strings.TrimSpace(*contextFlag)
+	if limitRaw == "" {
+		limitRaw = strings.TrimSpace(*limitFlag)
+	}
+	if limitRaw != "" {
+		parsedLimit, err := parseContextLimit(limitRaw)
+		if err == nil && parsedLimit > 0 {
+			cfg.ContextLimit = parsedLimit
+			configChanged = true
+		} else {
+			fmt.Printf("\033[33m[Предупреждение]\033[0m Неверный формат размера контекста '%s': %v. Используйте число или сокращение, например: 32k, 64k, 131072\n", limitRaw, err)
+		}
+	}
+
+	langRaw := strings.TrimSpace(*langFlag)
+	if langRaw == "" {
+		langRaw = strings.TrimSpace(*langLongFlag)
+	}
+	if langRaw != "" {
+		langClean := strings.ToLower(langRaw)
+		if langClean == "auto" || langClean == "default" || langClean == "off" || langClean == "none" {
+			cfg.Language = ""
+		} else {
+			cfg.Language = langClean
+		}
+		configChanged = true
+	}
+
+	if configChanged && configFound {
+		_ = saveConfigToFile(cfgPath, cfg)
 	}
 
 	cfg.URL = strings.TrimSpace(cfg.URL)
@@ -2949,7 +3185,12 @@ func main() {
 
 	fmt.Println("\n=======================================================")
 	fmt.Printf("   \033[1;36m%s\033[0m (%s, Go Standalone)\n", getPlatformName(), AppVersion)
-	fmt.Printf("   API: %s | Model: %s | Контекст: %d токенов\n", cfg.URL, cfg.Model, activeContextLimit)
+	langDisplay := "по умолчанию (язык вопроса)"
+	if cfg.Language != "" {
+		langDisplay = fmt.Sprintf("%s (%s)", cfg.Language, getLanguageDisplayName(cfg.Language))
+	}
+	fmt.Printf("   API: %s | Model: %s\n", cfg.URL, cfg.Model)
+	fmt.Printf("   Контекст: %s | Язык: %s\n", formatContextLimit(activeContextLimit), langDisplay)
 	fmt.Println("   (Введите \033[1m/help\033[0m для списка команд, \033[1m/update\033[0m для обновления)")
 	fmt.Println("=======================================================")
 
@@ -2987,12 +3228,15 @@ func main() {
 	}
 
 	if len(messages) == 0 {
-		systemPrompt := getDefaultSystemPrompt()
+		systemPrompt := buildSystemPrompt(cfg.Language)
 		messages = []Message{
 			{Role: "system", Content: &systemPrompt},
 		}
 		saveSession(messages)
 		saveMarkdownLog(messages, cfg.Model, cfg.URL)
+	} else if len(messages) > 0 && messages[0].Role == "system" {
+		systemPrompt := buildSystemPrompt(cfg.Language)
+		messages[0].Content = &systemPrompt
 	}
 
 	var lastUsage Usage

@@ -54,4 +54,5 @@ Write-Host "[SA42Agent] Запуск агента..." -ForegroundColor Green
 Set-Location -Path $installDir
 
 # Передаем параметры напрямую в процесс agent.exe (без записи config.json на диск)
-& $exePath -url $apiUrl -key $apiKey -model $aiModel
+& $exePath -url $apiUrl -key $apiKey -model $aiModel @args
+

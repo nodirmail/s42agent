@@ -47,7 +47,11 @@ Built with pure Go, it requires no heavy runtime dependencies (no Python, no Nod
 
 **Linux / macOS (Bash):**
 ```bash
+# Для текущего пользователя (в ~/.local/bin)
 curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.sh | bash
+
+# Или для всех пользователей системы (в /usr/local/bin, не требует настройки PATH)
+curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.sh | sudo bash
 ```
 
 **Windows (PowerShell):**
@@ -104,6 +108,12 @@ Create a `config.json` file in the application directory (or copy from `config.e
 # Launch with custom API endpoint and model
 ./agent -url "http://127.0.0.1:1234/v1" -model "qwen2.5-coder-7b-instruct"
 
+# Specify context limit manually (e.g. 32k, 64k, 131072) - saved to config
+./agent -c 32k
+
+# Set language priority (e.g. ru, en) - saved to config (default: responds in question language)
+./agent -l ru
+
 # Check and install latest release from GitHub
 ./agent -update
 
@@ -117,7 +127,7 @@ Create a `config.json` file in the application directory (or copy from `config.e
 ./agent -clean
 ```
 
-Environment variables supported: `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`.
+Environment variables supported: `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`, `AI_CONTEXT_LIMIT`, `AI_LANGUAGE`.
 
 ---
 
@@ -135,6 +145,8 @@ Environment variables supported: `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`.
 | `Ctrl + C` | Clear input (if text present) / Exit application (if empty) / Cancel streaming response |
 | `? <query>` | **Consultation Mode**: Text-only advice (tools disabled) |
 | `/image <path> [query]` | Analyze image or screenshot (also works with direct path in query) |
+| `/c [size]` | View or set context limit manually (e.g. `/c 32k`, `/c 131072`, saved to config) |
+| `/l [code]` | View or set language priority (e.g. `/l ru`, `/l en`, `/l auto`, saved to config) |
 | `/help` | Show available slash commands |
 | `/update` | Check for updates on GitHub and self-update |
 | `/version` | Display current application version |

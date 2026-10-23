@@ -110,12 +110,44 @@ case ":$PATH:" in
   *":${INSTALL_DIR}:"*) ;;
   *)
     echo ""
-    echo -e "${C_YELLOW}⚠️  Внимание:${C_RESET} Каталог ${INSTALL_DIR} отсутствует в вашем \$PATH."
-    echo -e "   Чтобы команда ${BINARY_NAME} была доступна отовсюду, добавьте в ~/.bashrc или ~/.zshrc:"
-    echo -e "   ${C_CYAN}export PATH=\"${INSTALL_DIR}:\$PATH\"${C_RESET}"
+    echo -e "${C_YELLOW}⚠️  Внимание:${C_RESET} Каталог ${C_CYAN}${INSTALL_DIR}${C_RESET} отсутствует в вашей системной переменной \$PATH."
+
+    # Определяем файл конфигурации шелла пользователя
+    DETECTED_RC=""
+    USER_SHELL="$(basename "${SHELL:-bash}")"
+    if [ "$USER_SHELL" = "zsh" ] && [ -f "${HOME}/.zshrc" ]; then
+      DETECTED_RC="${HOME}/.zshrc"
+    elif [ -f "${HOME}/.bashrc" ]; then
+      DETECTED_RC="${HOME}/.bashrc"
+    elif [ -f "${HOME}/.bash_profile" ]; then
+      DETECTED_RC="${HOME}/.bash_profile"
+    elif [ -f "${HOME}/.profile" ]; then
+      DETECTED_RC="${HOME}/.profile"
+    else
+      DETECTED_RC="${HOME}/.bashrc"
+    fi
+
+    LINE_TO_ADD='export PATH="$HOME/.local/bin:$PATH"'
+    if [ -f "$DETECTED_RC" ] && grep -Fqs '.local/bin' "$DETECTED_RC"; then
+      echo -e "   Путь уже прописан в ${C_CYAN}${DETECTED_RC}${C_RESET}, но терминал еще не обновлен."
+    else
+      echo "" >> "$DETECTED_RC"
+      echo "# Добавлено установщиком SA42Agent" >> "$DETECTED_RC"
+      echo "$LINE_TO_ADD" >> "$DETECTED_RC"
+      echo -e "${C_GREEN}✔${C_RESET} Путь автоматически добавлен в ${C_CYAN}${DETECTED_RC}${C_RESET}."
+    fi
+
+    echo ""
+    echo -e "   Скопируйте и выполните команду, чтобы применить изменения прямо сейчас:"
+    if [ "$USER_SHELL" = "zsh" ]; then
+      echo -e "   👉 ${C_GREEN}source ~/.zshrc${C_RESET}   (или: ${C_CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${C_RESET})"
+    else
+      echo -e "   👉 ${C_GREEN}source ~/.bashrc${C_RESET}  (или: ${C_CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${C_RESET})"
+    fi
     ;;
 esac
 
 echo ""
 "${TARGET_PATH}" -version || true
 echo -e "${C_GRAY}Для запуска введите: s42agent (или agent)${C_RESET}"
+
