@@ -82,7 +82,7 @@ func getSysTools() []ToolDefinition {
 
 func executeCmd(command string) string {
 	fmt.Printf("\n\033[33m[БЕЗОПАСНОСТЬ]\033[0m ИИ запрашивает выполнение команды:\n>>> \033[1m%s\033[0m\n", command)
-	if !askConfirmation("Разрешить запуск команды? (y/N): ") {
+	if !askConfirmation("Разрешить запуск команды? (y/N/A): ") {
 		return "ОШИБКА: Запуск отклонен пользователем."
 	}
 

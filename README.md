@@ -19,7 +19,7 @@ Built with pure Go, it requires no heavy runtime dependencies (no Python, no Nod
 * ❓ **Consultation / Question Mode (`?`)** — prepend queries with `?` (e.g. `? why did nginx fail`) to strictly disable tools at the software protocol level, forcing the model to provide text-only advisory answers without executing commands.
 * 🔍 **Auto Context Window Detection** — automatically reads the loaded context window length from LM Studio (`196608`), OpenRouter, vLLM, or model heuristics.
 * 🗜️ **Smart Context Compaction (`pruneContext`)** — automatically compacts older tool execution results when context usage exceeds **75%**, preventing `400 Context Length Exceeded` errors during long sessions.
-* 🔒 **Built-in Safety & Security** — explicit confirmation prompts (`[Y/n]`) for destructive actions, directory traversal safeguards (`/etc/shadow`, `System32`), command execution timeouts (2 min), and output truncation.
+* 🔒 **Built-in Safety & Security** — explicit confirmation prompts (`(y/N/A)`) for sensitive actions (choose `A` to allow all subsequent requests of this type), directory traversal safeguards (`/etc/shadow`, `System32`), command execution timeouts (2 min), and output truncation.
 * 💬 **Interactive Slash Commands** — in-chat commands like `/help`, `/model`, `/clear`, `/tokens`, `/compact`, `/exit`.
 * 💾 **Session Persistence** — automatic state saving to JSON and Markdown format with seamless recovery on restart.
 

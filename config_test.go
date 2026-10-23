@@ -158,3 +158,39 @@ func TestSaveAndLoadConfigWithContextAndLanguage(t *testing.T) {
 		t.Errorf("Language mismatch: got %s, want ru", loaded.Language)
 	}
 }
+
+func TestAskConfirmationAutoApprove(t *testing.T) {
+	// Backup original state
+	origAuto := autoApprove
+	origCmd := autoApproveCmd
+	origWrite := autoApproveWrite
+	origDownload := autoApproveDownload
+	defer func() {
+		autoApprove = origAuto
+		autoApproveCmd = origCmd
+		autoApproveWrite = origWrite
+		autoApproveDownload = origDownload
+	}()
+
+	autoApprove = false
+	autoApproveCmd = true
+	autoApproveWrite = false
+	autoApproveDownload = false
+
+	if !askConfirmation("Разрешить запуск команды? (y/N/A): ") {
+		t.Errorf("expected askConfirmation to return true when autoApproveCmd is true")
+	}
+
+	autoApproveCmd = false
+	autoApproveWrite = true
+	if !askConfirmation("Разрешить запись на диск? (y/N/A): ") {
+		t.Errorf("expected askConfirmation to return true when autoApproveWrite is true")
+	}
+
+	autoApproveWrite = false
+	autoApproveDownload = true
+	if !askConfirmation("Разрешить скачивание файла? (y/N/A): ") {
+		t.Errorf("expected askConfirmation to return true when autoApproveDownload is true")
+	}
+}
+

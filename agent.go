@@ -163,7 +163,12 @@ type Config struct {
 	Language     string `json:"language,omitempty"`
 }
 
-var autoApprove bool
+var (
+	autoApprove         bool
+	autoApproveCmd      bool
+	autoApproveWrite    bool
+	autoApproveDownload bool
+)
 var reader = bufio.NewReader(os.Stdin)
 
 func readLineWithPrompt(prompt string) (string, error) {
@@ -1022,10 +1027,27 @@ func readUserInput() (string, error) {
 }
 
 func askConfirmation(prompt string) bool {
+	isCmd := strings.Contains(prompt, "запуск команды")
+	isWrite := strings.Contains(prompt, "запись на диск")
+	isDownload := strings.Contains(prompt, "скачивание файла")
+
 	if autoApprove {
 		fmt.Println(prompt + "Y (Автоматически разрешено флагом -A)")
 		return true
 	}
+	if isCmd && autoApproveCmd {
+		fmt.Println(prompt + "Y (Автоматически разрешено для команд)")
+		return true
+	}
+	if isWrite && autoApproveWrite {
+		fmt.Println(prompt + "Y (Автоматически разрешено для записи файлов)")
+		return true
+	}
+	if isDownload && autoApproveDownload {
+		fmt.Println(prompt + "Y (Автоматически разрешено для скачивания)")
+		return true
+	}
+
 	for {
 		input, err := readLineWithPrompt(prompt)
 		if err != nil {
@@ -1036,13 +1058,29 @@ func askConfirmation(prompt string) bool {
 			return false
 		}
 		input = strings.ToLower(strings.TrimSpace(input))
-		if input == "y" || input == "yes" {
+		if input == "y" || input == "yes" || input == "д" || input == "да" {
 			return true
 		}
-		if input == "n" || input == "no" || input == "" {
+		if input == "a" || input == "all" || input == "always" || input == "ф" || input == "в" || input == "всегда" {
+			if isCmd {
+				autoApproveCmd = true
+				fmt.Println("\033[1;32m[Всегда разрешать]\033[0m Все последующие команды будут выполняться автоматически без подтверждения.")
+			} else if isWrite {
+				autoApproveWrite = true
+				fmt.Println("\033[1;32m[Всегда разрешать]\033[0m Все последующие записи на диск будут выполняться автоматически без подтверждения.")
+			} else if isDownload {
+				autoApproveDownload = true
+				fmt.Println("\033[1;32m[Всегда разрешать]\033[0m Все последующие скачивания файлов будут выполняться автоматически без подтверждения.")
+			} else {
+				autoApprove = true
+				fmt.Println("\033[1;32m[Всегда разрешать]\033[0m Все последующие запросы будут подтверждаться автоматически.")
+			}
+			return true
+		}
+		if input == "n" || input == "no" || input == "н" || input == "нет" || input == "" {
 			return false
 		}
-		fmt.Println("Пожалуйста, введите Y или N.")
+		fmt.Println("Пожалуйста, введите Y (да), N (нет) или A (всегда разрешать этот тип действий).")
 	}
 }
 
@@ -1455,7 +1493,7 @@ func writeFile(path string, content string) string {
 		fmt.Println("... [данные обрезаны для превью]")
 	}
 
-	if !askConfirmation("Разрешить запись на диск? (y/N): ") {
+	if !askConfirmation("Разрешить запись на диск? (y/N/A): ") {
 		return "ОШИБКА: Запись отклонена пользователем."
 	}
 
@@ -1707,7 +1745,7 @@ func downloadFile(urlStr, path string) string {
 	}
 
 	fmt.Printf("\n[БЕЗОПАСНОСТЬ] ИИ запрашивает скачивание файла из Интернета:\nURL: %s\nКуда: %s\n", urlStr, path)
-	if !askConfirmation("Разрешить скачивание файла? (y/N): ") {
+	if !askConfirmation("Разрешить скачивание файла? (y/N/A): ") {
 		return "ОШИБКА: Скачивание отклонено пользователем."
 	}
 
@@ -2812,6 +2850,9 @@ func handleSlashCommand(input string, cfg *Config, cfgPath string, messages *[]M
 		return true
 
 	case "/clear", "/reset":
+		autoApproveCmd = false
+		autoApproveWrite = false
+		autoApproveDownload = false
 		systemPrompt := buildSystemPrompt(cfg.Language)
 		*messages = []Message{
 			{Role: "system", Content: &systemPrompt},
