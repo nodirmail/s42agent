@@ -58,6 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/ins
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/nodirmail/s42agent/main/install/install.ps1 | iex
 ```
+> 💡 *Automatically detects older Windows versions (Windows Server 2008 R2 SP1, Windows 7, Windows 8, Server 2012) and installs the compatible legacy build without `bcryptprimitives.dll` errors.*
 
 ---
 
@@ -66,8 +67,9 @@ curl -fsSL https://raw.githubusercontent.com/nodirmail/s42agent/main/install/ins
 Download ready-to-run binaries directly from [GitHub Releases](https://github.com/nodirmail/s42agent/releases) for your OS and architecture:
 
 * **Linux**: `s42agent-linux-amd64` / `s42agent-linux-arm64`
-* **Windows**: `s42agent-windows-amd64.exe` / `s42agent-windows-arm64.exe`
-* **macOS**: `s42agent-darwin-arm64` (Apple Silicon) / `s42agent-darwin-amd64` (Intel)
+* **Windows (10 / 11 / Server 2016+)**: `s42agent-windows-amd64.exe` / `s42agent-windows-arm64.exe`
+* **Windows Legacy (Server 2008 R2 / Win 7 / 8 / Server 2012)**: `s42agent-windows-amd64-legacy.exe` / `s42agent-windows-386-legacy.exe`
+* **macOS**: `s42agent-darwin-amd64` (Intel) / `s42agent-darwin-arm64` (Apple Silicon)
 
 ---
 

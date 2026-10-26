@@ -1,3 +1,7 @@
+param(
+    [switch]$Legacy
+)
+
 # ==============================================================================
 # SA42Agent Installer for Windows (PowerShell)
 # ==============================================================================
@@ -10,18 +14,35 @@ $binaryName = "s42agent"
 
 Write-Host "=== Установка SA42Agent ===" -ForegroundColor Cyan
 
-# 1. Определение архитектуры
-$arch = if ([System.Environment]::Is64BitOperatingSystem) {
+# 1. Определение архитектуры и совместимости с ОС
+$is64Bit = [System.Environment]::Is64BitOperatingSystem
+$arch = if ($is64Bit) {
     if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
 } else {
-    Write-Error "32-битные операционные системы не поддерживаются."
-    exit 1
+    "386"
 }
 
-$assetName = "${binaryName}-windows-${arch}.exe"
+# В версиях Windows NT до 10.0 (Windows 7 / Server 2008 R2 / 8 / 2012)
+# отсутствует bcryptprimitives.dll, поэтому используется legacy-сборка Go 1.20
+$osVersion = [System.Environment]::OSVersion.Version
+$isLegacyOS = $Legacy -or ($osVersion.Major -lt 10)
+
+if ($isLegacyOS) {
+    $assetName = "${binaryName}-windows-${arch}-legacy.exe"
+} else {
+    if (-not $is64Bit) {
+        Write-Error "32-битные операционные системы поддерживаются только через legacy сборку (Windows 7/2008)."
+        exit 1
+    }
+    $assetName = "${binaryName}-windows-${arch}.exe"
+}
+
 $downloadUrl = "https://github.com/${repo}/releases/latest/download/${assetName}"
 
 Write-Host "Платформа: windows/$arch" -ForegroundColor Green
+if ($isLegacyOS) {
+    Write-Host "Режим совместимости: Legacy (Windows Server 2008 R2 / Win 7 / 2012)" -ForegroundColor Yellow
+}
 Write-Host "Файл релиза: $assetName" -ForegroundColor Gray
 
 # 2. Каталог установки в профиле пользователя (не требует прав администратора)

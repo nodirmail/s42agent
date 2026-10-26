@@ -48,10 +48,23 @@ jobs:
             echo "Building for $GOOS/$GOARCH -> $OUTPUT_NAME"
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-s -w" -o "dist/$OUTPUT_NAME" .
           done
+
+      - name: Build legacy Windows binaries (Go 1.20 for Windows 7 / Server 2008 R2 / 2012)
+        run: |
+          mkdir -p /tmp/go120
+          curl -sL https://dl.google.com/go/go1.20.14.linux-amd64.tar.gz | tar -xz -C /tmp/go120 --strip-components=1
+          
+          echo "Building legacy Windows amd64..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 /tmp/go120/bin/go build -ldflags="-s -w" -o "dist/s42agent-windows-amd64-legacy.exe" .
+          
+          echo "Building legacy Windows 386..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=386 /tmp/go120/bin/go build -ldflags="-s -w" -o "dist/s42agent-windows-386-legacy.exe" .
           
           cd dist
+          rm -f checksums.txt
           sha256sum * > checksums.txt
           ls -la
+
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
